@@ -11,6 +11,9 @@ name: Test build artifact
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - ci/test-build-artifact
 
 permissions:
   contents: read
