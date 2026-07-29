@@ -415,9 +415,12 @@ class TranscriptedAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegat
                 // showed nothing at all. These properties are already the
                 // bucketed, privacy-safe analytics shape (provider and reason
                 // enums, no titles or device names), so they are safe to keep.
+                // The trail event name deliberately differs from the analytics
+                // event: AnalyticsEventPolicyTests pins each analytics literal
+                // to exactly one occurrence in this file.
                 DiagnosticsTrail.record(
                     engine: "meeting",
-                    event: "meeting_prompt_suppressed",
+                    event: "meeting_prompt_decision_suppressed",
                     message: "Meeting prompt suppressed",
                     context: suppressionProperties
                 )
@@ -445,7 +448,7 @@ class TranscriptedAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegat
                     // shows both halves of every prompt decision.
                     DiagnosticsTrail.record(
                         engine: "meeting",
-                        event: "meeting_prompt_shown",
+                        event: "meeting_prompt_decision_shown",
                         message: "Meeting prompt shown",
                         context: shownProperties
                     )
