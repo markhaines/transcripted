@@ -575,4 +575,66 @@ func testMeetingPromptHeuristics() {
         assertEqual(MeetingPromptCallTelemetry.dismissStreakBucket(2), "2", "a second dismissal is its own bucket")
         assertEqual(MeetingPromptCallTelemetry.dismissStreakBucket(5), "3_plus", "streaks collapse past three")
     }
+
+    runSuite("MeetingPromptHeuristics.adHocDismissalDeadline — 'not now' on a live call means not this call") {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let longDeadline = now.addingTimeInterval(MeetingPromptHeuristics.teamsDismissMinimumInterval)
+        let cappedDeadline = now.addingTimeInterval(MeetingPromptHeuristics.adHocCallDismissCap)
+
+        assertEqual(
+            MeetingPromptHeuristics.adHocDismissalDeadline(longDeadline, reason: .micInput, now: now),
+            cappedDeadline,
+            "a dismissed mic-confirmed call must not mute the provider for hours"
+        )
+        assertEqual(
+            MeetingPromptHeuristics.adHocDismissalDeadline(longDeadline, reason: .audioOutput, now: now),
+            cappedDeadline,
+            "the listen-only signal is the same strength of evidence as the mic"
+        )
+        assertEqual(
+            MeetingPromptHeuristics.adHocDismissalDeadline(longDeadline, reason: .cameraInput, now: now),
+            cappedDeadline,
+            "the camera signal is capped alongside the other ad-hoc sensors"
+        )
+        assertEqual(
+            MeetingPromptHeuristics.adHocDismissalDeadline(longDeadline, reason: .runtimeOnly, now: now),
+            longDeadline,
+            "weak 'the app is open' prompts keep their sticky dismissal"
+        )
+        assertEqual(
+            MeetingPromptHeuristics.adHocDismissalDeadline(longDeadline, reason: .calendarNearby, now: now),
+            longDeadline,
+            "calendar prompts keep their sticky dismissal"
+        )
+
+        let shortDeadline = now.addingTimeInterval(60)
+        assertEqual(
+            MeetingPromptHeuristics.adHocDismissalDeadline(shortDeadline, reason: .micInput, now: now),
+            shortDeadline,
+            "the cap is a ceiling, never an extension of a shorter backoff"
+        )
+    }
+
+    runSuite("MeetingPromptHeuristics.adHocSuppressionDeadline — provider suppression ages out for live calls") {
+        let writtenAt = Date(timeIntervalSince1970: 1_000)
+        let longUntil = writtenAt.addingTimeInterval(MeetingPromptHeuristics.teamsDismissMinimumInterval)
+
+        assertEqual(
+            MeetingPromptHeuristics.adHocSuppressionDeadline(suppressedUntil: longUntil, suppressedFrom: writtenAt),
+            writtenAt.addingTimeInterval(MeetingPromptHeuristics.adHocCallDismissCap),
+            "a long provider suppression should only briefly cover the live-call path"
+        )
+        assertEqual(
+            MeetingPromptHeuristics.adHocSuppressionDeadline(suppressedUntil: longUntil, suppressedFrom: nil),
+            longUntil,
+            "without a known start the suppression is honored in full"
+        )
+
+        let shortUntil = writtenAt.addingTimeInterval(60)
+        assertEqual(
+            MeetingPromptHeuristics.adHocSuppressionDeadline(suppressedUntil: shortUntil, suppressedFrom: writtenAt),
+            shortUntil,
+            "the cap must never extend a suppression that was already shorter"
+        )
+    }
 }

@@ -548,6 +548,63 @@ prompt carries its trigger, and `meeting_recording_stopped` /
 meeting" is `prompt_outcome=recorded` on long `duration_bucket`s, corroborated
 by recording-side durations.
 
+## Phase 5 — dismissals were muting calls that hadn't happened yet (2026-07-29)
+
+Field report: Teams calls "often" produce no prompt, while a competitor catches
+every one. The missed-call nudge *did* fire afterwards, which is the diagnostic
+tell: the nudge only exists once the detector has assembled a detected-call
+session, so the sensors saw the call. The failure was entirely in prompt policy,
+downstream of detection. Two bugs, both of which read as "detection is
+unreliable" from the outside.
+
+### Bug 1 — one dismissal muted a provider for hours
+
+`dismiss` writes two locks, and both used weak-signal intervals:
+
+1. `runtimeSuppressedUntil[provider]`, which `micInputCandidates` also honors.
+   With `teamsDismissMinimumInterval` (2h), a single "not now" silenced every
+   mic-confirmed Teams call for the rest of the morning.
+2. The candidate-level cooldown. Ad-hoc candidate ids are per-*provider*
+   (`mic:teams`), not per-call — that stable id is exactly what lets the mic,
+   output, and camera sensors de-dupe into one prompt — so a candidate snooze
+   behaves like a provider-wide mute for every later call from the same app.
+
+The evidence strengths are not comparable. "Teams is open" is a guess and earns a
+sticky backoff; a process holding the mic right now is a call that is actually
+happening. "Not now" on the latter means *not this call*.
+
+**Fix:** `MeetingPromptHeuristics.adHocCallDismissCap` (10 min) bounds both locks
+for ad-hoc reasons only. `adHocDismissalDeadline` clamps what a dismissal writes;
+`adHocSuppressionDeadline` clamps what the ad-hoc path *reads*, relative to a new
+`runtimeSuppressedFrom` stamp, so a long backoff written by a dismissed calendar
+reminder also cannot mute a live call. Weak runtime candidates still read
+`runtimeSuppressedUntil` directly and are unchanged. Provider-agnostic by
+design: this is a statement about trusting strong evidence, not a Teams patch.
+
+### Bug 2 — a snoozed calendar prompt swallowed the live-call prompt
+
+`preferredCandidate` handed preference to a same-provider calendar candidate for
+native providers unconditionally. `evaluate()` then bailed on *that* candidate's
+cooldown and never reconsidered the ad-hoc one. So dismissing "starts in 1 min"
+also disabled "you are in this call right now" for the same meeting.
+
+**Fix:** prefer the titled calendar candidate only while it can still prompt;
+once it is snoozed or pending, fall back to the ad-hoc candidate. The `.googleMeet`
+branch keeps its existing inverted behavior (it deliberately picks a cooled-down
+calendar candidate to stay quiet) and is untouched here.
+
+### Observability — prompt decisions are now in the local log
+
+`meeting_prompt_shown` and `meeting_prompt_suppressed` went only to analytics, so
+"why didn't it offer to record my call?" was undiagnosable on the machine it
+happened on: `events.jsonl` contained nothing about prompts at all. Both now also
+go through `DiagnosticsTrail`, reusing the same bucketed, privacy-safe property
+shape (provider/reason enums, no titles or device names).
+
+**Coverage:** new `MeetingPromptHeuristicsTests` cases for both cap helpers, and
+`SyntheticMeetingPromptTests` regressions for the stale-dismissal and
+snoozed-calendar cases.
+
 **Deliberately not built: default auto-record.** A visible countdown that
 auto-starts recording (Notion-style) remains the documented *opt-in* design in
 `docs/MEETING_CAPTURE_PROMPTING.md` — short countdown (~8s, with the prompt
