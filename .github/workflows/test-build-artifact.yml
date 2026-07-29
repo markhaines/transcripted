@@ -1,0 +1,67 @@
+# Fork-only workflow (markhaines/transcripted): build an installable test app.
+#
+# Mirrors the app-build job from swift-ci.yml, then uploads the built
+# Transcripted.app as a downloadable artifact. The bundle is zipped with
+# ditto before upload because upload-artifact does not preserve the
+# symlinks inside Sparkle.framework.
+#
+# Not intended for upstream — this branch never becomes a PR.
+
+name: Test build artifact
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-artifact:
+    runs-on: macos-26
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Cache prebuilt dependencies
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps-libs
+            deps-modules
+            deps-frameworks
+            deps-tools
+          key: deps-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/entrypoints/build-deps.sh', 'Package.swift', 'Sources/TranscriptedCore/**') }}
+          restore-keys: |
+            deps-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.deps-cache.outputs.cache-hit }}" = "true" ]; then
+            touch deps-libs/.build-deps-stamp
+          fi
+          bash build-deps.sh
+
+      - name: Fast tests
+        shell: bash
+        run: bash run-tests.sh
+
+      - name: Build app
+        shell: bash
+        run: bash build.sh --no-open
+
+      - name: Zip app bundle
+        shell: bash
+        run: ditto -c -k --keepParent build/Transcripted.app build/Transcripted.app.zip
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Transcripted-app
+          path: build/Transcripted.app.zip
+          retention-days: 7
+          if-no-files-found: error
