@@ -234,3 +234,16 @@ See `docs/storage-paths.md` for the canonical storage map, including legacy fall
 ## Default orchestration: ultracode + workflows
 
 For substantive work — research, audits, multi-file or cross-cutting changes, design, and reviews — default to authoring and running a **Workflow** that fans out parallel agents and adversarially verifies findings, rather than working solo. Reserve solo execution for trivial mechanical edits and conversational replies. Spawned worker threads inherit this default: a thread doing real work should itself orchestrate with a workflow wherever breadth or independent verification helps. Token cost is not the constraint here — correctness and coverage are. This is "ultracode" as the standing default for this repo.
+
+## Decisions
+
+Architectural decisions live in `docs/adr/`, one numbered file each, indexed at
+[`docs/adr/README.md`](docs/adr/README.md). **Read the index before changing how this repo is
+built.** Several things here that look wrong, or look like they should be replaced with the
+standard off-the-shelf component, are deliberate and recorded there with the reason.
+
+`GLOSSARY.md` covers terms that mean something specific in this repo.
+
+**Merge readiness:** before a branch merges, say what it changed about the ADR library, and
+land those updates in the same change. A decision recorded a week later is a decision nobody
+recorded.
