@@ -469,6 +469,57 @@ enum MeetingPromptHeuristics {
         provider == .teams ? max(defaultInterval, teamsDismissMinimumInterval) : defaultInterval
     }
 
+    // MARK: Ad-hoc live-call dismissal cap
+    //
+    // Dismissing an ad-hoc call prompt used to inherit the same backoff as the
+    // weak signals, and that silenced hours of genuinely detected calls. Two
+    // separate locks caused it, both written by one `dismiss`:
+    //
+    // 1. The provider-wide runtime suppression (`runtimeSuppressedUntil`), which
+    //    `micInputCandidates` also honors. With the Teams floor below, one "not
+    //    now" muted Teams for two hours.
+    // 2. The candidate-level cooldown. Ad-hoc candidate ids are per-*provider*
+    //    (`mic:teams`), not per-call — that stable id is what lets the mic,
+    //    output, and camera sensors de-dupe into a single prompt — so a
+    //    candidate-level snooze behaves like a provider-wide mute for every
+    //    later call from the same app.
+    //
+    // The evidence strengths are not comparable. "Teams is open" is a guess and
+    // deserves a long, sticky backoff. A process holding the mic right now is a
+    // call that is actually happening, and "not now" on it means "not *this*
+    // call", not "no Teams calls this afternoon". So an ad-hoc dismissal is
+    // capped well below the weak-signal intervals. Re-prompting during the same
+    // call is still prevented, because a dismissed call keeps running past the
+    // cap only in the rare long-call case, and the cap is comfortably longer
+    // than the prompt/re-offer window.
+    //
+    // Deliberately provider-agnostic: this is a statement about how much a
+    // dismissal of strong evidence should be trusted, not a Teams special case.
+    static let adHocCallDismissCap: TimeInterval = 10 * 60
+
+    /// Clamps a computed dismissal deadline for ad-hoc live-call prompts.
+    /// Weak (calendar / runtime-app) prompts pass through unchanged.
+    static func adHocDismissalDeadline(
+        _ until: Date,
+        reason: MeetingPromptReason,
+        now: Date
+    ) -> Date {
+        guard reason.isAdHocCallSignal else { return until }
+        return min(until, now.addingTimeInterval(adHocCallDismissCap))
+    }
+
+    /// How long a provider-wide suppression written at `suppressedFrom` may
+    /// silence *ad-hoc* live-call candidates. The weak runtime prompt keeps the
+    /// full `suppressedUntil`; only the strong live-call path is capped, so a
+    /// dismissed calendar reminder cannot mute an in-progress call for hours.
+    static func adHocSuppressionDeadline(
+        suppressedUntil: Date,
+        suppressedFrom: Date?
+    ) -> Date {
+        guard let suppressedFrom else { return suppressedUntil }
+        return min(suppressedUntil, suppressedFrom.addingTimeInterval(adHocCallDismissCap))
+    }
+
     static func backoffKind(
         for provider: MeetingPromptProvider,
         source: MeetingPromptSource,
@@ -624,6 +675,11 @@ struct MeetingPromptRuntimeSnapshot: Equatable {
     let frontmostBundleID: String?
     let recentNativeActivity: [MeetingPromptProvider: Date]
     let runtimeSuppressedUntil: [MeetingPromptProvider: Date]
+    /// When each provider's runtime suppression was written. Ad-hoc live-call
+    /// candidates cap their view of that suppression relative to this instant,
+    /// so a long weak-signal backoff cannot mute a call in progress. Mirrors
+    /// `MeetingPromptDetector.runtimeSuppressedFrom`.
+    let runtimeSuppressedFrom: [MeetingPromptProvider: Date]
     let micActiveBundleIDs: Set<String>
     /// Whether a camera has been confirmed in use (CameraActivityMonitor). Boolean
     /// only — CoreMediaIO gives no process attribution — so it is attributed to a
@@ -641,6 +697,7 @@ struct MeetingPromptRuntimeSnapshot: Equatable {
         frontmostBundleID: String?,
         recentNativeActivity: [MeetingPromptProvider: Date],
         runtimeSuppressedUntil: [MeetingPromptProvider: Date],
+        runtimeSuppressedFrom: [MeetingPromptProvider: Date] = [:],
         micActiveBundleIDs: Set<String> = [],
         cameraInUse: Bool = false,
         audioOutputActiveBundleIDs: Set<String> = [],
@@ -651,11 +708,24 @@ struct MeetingPromptRuntimeSnapshot: Equatable {
         self.frontmostBundleID = frontmostBundleID
         self.recentNativeActivity = recentNativeActivity
         self.runtimeSuppressedUntil = runtimeSuppressedUntil
+        self.runtimeSuppressedFrom = runtimeSuppressedFrom
         self.micActiveBundleIDs = micActiveBundleIDs
         self.cameraInUse = cameraInUse
         self.audioOutputActiveBundleIDs = audioOutputActiveBundleIDs
         self.isOwnCaptureActive = isOwnCaptureActive
         self.isMicInputPromptEnabled = isMicInputPromptEnabled
+    }
+
+    /// Provider suppression as seen by *ad-hoc live-call* candidates: capped
+    /// relative to when it was written. Weak runtime candidates keep reading
+    /// `runtimeSuppressedUntil` directly. Mirrors
+    /// `MeetingPromptDetector.adHocSuppressionDeadline(for:)`.
+    func adHocSuppressionDeadline(for provider: MeetingPromptProvider) -> Date? {
+        guard let until = runtimeSuppressedUntil[provider] else { return nil }
+        return MeetingPromptHeuristics.adHocSuppressionDeadline(
+            suppressedUntil: until,
+            suppressedFrom: runtimeSuppressedFrom[provider]
+        )
     }
 
     static let browserBundleIdentifiers: Set<String> = [
@@ -863,7 +933,7 @@ enum MeetingPromptSyntheticEvaluator {
         guard micInputSuppression(from: snapshot, now: now) == nil else { return [] }
 
         return callSignals(from: snapshot).compactMap { signal in
-            if let suppressedUntil = snapshot.runtimeSuppressedUntil[signal.provider], suppressedUntil > now {
+            if let suppressedUntil = snapshot.adHocSuppressionDeadline(for: signal.provider), suppressedUntil > now {
                 return nil
             }
             return micInputCandidate(for: signal.provider, reason: signal.reason, now: now)
@@ -929,7 +999,7 @@ enum MeetingPromptSyntheticEvaluator {
             return .ownCaptureActive
         }
         if providers.allSatisfy({ provider in
-            (snapshot.runtimeSuppressedUntil[provider] ?? .distantPast) > now
+            (snapshot.adHocSuppressionDeadline(for: provider) ?? .distantPast) > now
         }) {
             return .runtimeSuppressed
         }
@@ -978,7 +1048,17 @@ enum MeetingPromptSyntheticEvaluator {
                 $0.candidate.provider == first.candidate.provider
         }
         guard first.candidate.provider == .googleMeet else {
-            return calendarCandidate ?? first
+            guard let calendarCandidate else { return first }
+            // Mirrors MeetingPromptDetector.preferredCandidate: prefer the
+            // titled calendar candidate only while it can still prompt. Once it
+            // is snoozed or dismissed, preferring it would silently suppress the
+            // live-call prompt too, so fall back to the ad-hoc candidate.
+            return hasActiveCooldown(
+                for: calendarCandidate.candidate.id,
+                snoozedUntil: snoozedUntil,
+                pendingUntil: pendingUntil,
+                now: now
+            ) ? first : calendarCandidate
         }
 
         return sortedCandidates.first {

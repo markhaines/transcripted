@@ -403,13 +403,26 @@ class TranscriptedAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegat
                         suppressionReason: suppression.reason
                     )
                 )
-                AnalyticsReporter.track(
-                    "meeting_prompt_suppressed",
-                    properties: MeetingPromptTelemetry.properties(
-                        for: suppression,
-                        readiness: readiness,
-                        signals: self.meetingPromptDetector.currentSignalSnapshot()
-                    )
+                let suppressionProperties = MeetingPromptTelemetry.properties(
+                    for: suppression,
+                    readiness: readiness,
+                    signals: self.meetingPromptDetector.currentSignalSnapshot()
+                )
+                AnalyticsReporter.track("meeting_prompt_suppressed", properties: suppressionProperties)
+                // Also record locally. Prompt decisions used to exist only in
+                // analytics, so "why didn't it offer to record my call?" was
+                // undiagnosable from the machine it happened on — the local log
+                // showed nothing at all. These properties are already the
+                // bucketed, privacy-safe analytics shape (provider and reason
+                // enums, no titles or device names), so they are safe to keep.
+                // The trail event name deliberately differs from the analytics
+                // event: AnalyticsEventPolicyTests pins each analytics literal
+                // to exactly one occurrence in this file.
+                DiagnosticsTrail.record(
+                    engine: "meeting",
+                    event: "meeting_prompt_decision_suppressed",
+                    message: "Meeting prompt suppressed",
+                    context: suppressionProperties
                 )
             }
             meetingPromptDetector.onPromptRequest = { [weak self] candidate in
@@ -425,13 +438,19 @@ class TranscriptedAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegat
                 )
                 if presented {
                     self.meetingPromptShownAtByCandidateID[candidate.id] = Date()
-                    AnalyticsReporter.track(
-                        "meeting_prompt_shown",
-                        properties: MeetingPromptTelemetry.properties(
-                            for: candidate,
-                            readiness: self.meetingPromptTelemetryReadiness(),
-                            signals: self.meetingPromptDetector.currentSignalSnapshot()
-                        )
+                    let shownProperties = MeetingPromptTelemetry.properties(
+                        for: candidate,
+                        readiness: self.meetingPromptTelemetryReadiness(),
+                        signals: self.meetingPromptDetector.currentSignalSnapshot()
+                    )
+                    AnalyticsReporter.track("meeting_prompt_shown", properties: shownProperties)
+                    // Paired with the suppression trail above so the local log
+                    // shows both halves of every prompt decision.
+                    DiagnosticsTrail.record(
+                        engine: "meeting",
+                        event: "meeting_prompt_decision_shown",
+                        message: "Meeting prompt shown",
+                        context: shownProperties
                     )
                 }
                 return presented

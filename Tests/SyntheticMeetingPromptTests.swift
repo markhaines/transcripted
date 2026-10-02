@@ -9,6 +9,7 @@ private func syntheticRuntimeSnapshot(
     frontmostBundleID: String? = nil,
     recentNativeActivity: [MeetingPromptProvider: Date] = [:],
     runtimeSuppressedUntil: [MeetingPromptProvider: Date] = [:],
+    runtimeSuppressedFrom: [MeetingPromptProvider: Date] = [:],
     micActiveBundleIDs: Set<String> = [],
     cameraInUse: Bool = false,
     audioOutputActiveBundleIDs: Set<String> = [],
@@ -20,6 +21,7 @@ private func syntheticRuntimeSnapshot(
         frontmostBundleID: frontmostBundleID,
         recentNativeActivity: recentNativeActivity,
         runtimeSuppressedUntil: runtimeSuppressedUntil,
+        runtimeSuppressedFrom: runtimeSuppressedFrom,
         micActiveBundleIDs: micActiveBundleIDs,
         cameraInUse: cameraInUse,
         audioOutputActiveBundleIDs: audioOutputActiveBundleIDs,
@@ -769,5 +771,61 @@ func testSyntheticMeetingPrompt() {
         )
         assertFalse(result.shouldPrompt, "an explicit dismissal must keep suppressing the same provider's output signal")
         assertEqual(result.suppressionReason, .runtimeSuppressed, "provider-level suppression covers the output path")
+    }
+
+    runSuite("SyntheticMeetingPrompts — a stale Teams dismissal stops muting live calls") {
+        // Regression: Teams dismissals write a 2h provider suppression, which the
+        // ad-hoc path also honored. One "not now" in the morning silenced every
+        // genuinely mic-confirmed Teams call for the rest of it.
+        let dismissedAt = syntheticPromptNow
+            .addingTimeInterval(-MeetingPromptHeuristics.adHocCallDismissCap - 60)
+        let stillInsideCap = evaluateSyntheticPrompt(
+            calendarEvents: [],
+            runtimeSnapshot: syntheticRuntimeSnapshot(
+                runtimeSuppressedUntil: [
+                    .teams: syntheticPromptNow.addingTimeInterval(MeetingPromptHeuristics.teamsDismissMinimumInterval)
+                ],
+                runtimeSuppressedFrom: [.teams: syntheticPromptNow.addingTimeInterval(-60)],
+                micActiveBundleIDs: ["com.microsoft.teams2.helper"]
+            )
+        )
+        let pastCap = evaluateSyntheticPrompt(
+            calendarEvents: [],
+            runtimeSnapshot: syntheticRuntimeSnapshot(
+                runtimeSuppressedUntil: [
+                    .teams: syntheticPromptNow.addingTimeInterval(MeetingPromptHeuristics.teamsDismissMinimumInterval)
+                ],
+                runtimeSuppressedFrom: [.teams: dismissedAt],
+                micActiveBundleIDs: ["com.microsoft.teams2.helper"]
+            )
+        )
+
+        assertFalse(stillInsideCap.shouldPrompt, "a fresh dismissal should still silence the call the user declined")
+        assertTrue(pastCap.shouldPrompt, "a live Teams call must prompt once the ad-hoc cap has passed, despite the 2h provider suppression")
+        assertEqual(pastCap.candidate?.id, "mic:teams", "the live mic signal should be the surviving candidate")
+        assertEqual(pastCap.candidate?.reason, .micInput, "the surviving candidate should keep the mic reason")
+    }
+
+    runSuite("SyntheticMeetingPrompts — a snoozed calendar prompt does not swallow the live call prompt") {
+        // Regression: for native providers the calendar candidate was preferred
+        // unconditionally, so evaluate() bailed on its cooldown and never
+        // reconsidered the ad-hoc candidate. Dismissing "starts in 1 min" also
+        // disabled "you are in this call right now".
+        let snoozedCalendar = evaluateSyntheticPrompt(
+            calendarEvents: [
+                syntheticCalendarEvent(
+                    id: "teams-standup",
+                    startsIn: 20,
+                    url: URL(string: "https://teams.microsoft.com/l/meetup-join/abc")
+                )
+            ],
+            runtimeSnapshot: syntheticRuntimeSnapshot(
+                micActiveBundleIDs: ["com.microsoft.teams2.helper"]
+            ),
+            snoozedUntil: ["calendar:teams-standup": syntheticPromptNow.addingTimeInterval(60)]
+        )
+
+        assertTrue(snoozedCalendar.shouldPrompt, "a live Teams call must still prompt after its calendar reminder was snoozed")
+        assertEqual(snoozedCalendar.candidate?.id, "mic:teams", "the ad-hoc candidate should take over from the cooled-down calendar one")
     }
 }

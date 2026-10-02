@@ -74,6 +74,11 @@ final class MeetingPromptDetector {
     private var pendingUntil: [String: Date] = [:]
     private var recentNativeActivity: [MeetingPromptProvider: Date] = [:]
     private var runtimeSuppressedUntil: [MeetingPromptProvider: Date] = [:]
+    // When each provider's runtime suppression was written. Ad-hoc live-call
+    // candidates cap their view of that suppression relative to this instant
+    // (`MeetingPromptHeuristics.adHocSuppressionDeadline`), so a long weak-signal
+    // backoff cannot mute a call that is demonstrably happening right now.
+    private var runtimeSuppressedFrom: [MeetingPromptProvider: Date] = [:]
     private var cooldownReasons: [String: String] = [:]
     private var runtimeSuppressionReasons: [MeetingPromptProvider: String] = [:]
     private var suppressionTelemetryUntil: [String: Date] = [:]
@@ -278,23 +283,33 @@ final class MeetingPromptDetector {
             )
             suppressRuntimePrompts(for: candidate.provider, until: until, reason: decision.kind.rawValue)
         case .runtimeApp:
+            // Ad-hoc live-call prompts share this source with the weak
+            // "app is open" prompts, so clamp their deadline before it reaches
+            // either lock. Dismissing a call that is happening now means "not
+            // this call" and must not mute the next one for hours.
+            let kind: MeetingPromptBackoffKind
+            let rawUntil: Date
             if let resumeDate = nextRuntimePromptResumeDate(for: candidate.provider, now: now) {
-                until = resumeDate
-                decision = MeetingPromptBackoffDecision(
-                    kind: MeetingPromptHeuristics.backoffKind(for: candidate.provider, source: .runtimeApp, hasResumeDate: true),
-                    until: until
+                rawUntil = resumeDate
+                kind = MeetingPromptHeuristics.backoffKind(
+                    for: candidate.provider,
+                    source: .runtimeApp,
+                    hasResumeDate: true
                 )
             } else {
                 let fallbackInterval = MeetingPromptHeuristics.dismissMinimumInterval(
                     for: candidate.provider,
                     default: MeetingPromptHeuristics.defaultRuntimeDismissFallbackInterval
                 )
-                until = now.addingTimeInterval(fallbackInterval)
-                decision = MeetingPromptBackoffDecision(
-                    kind: MeetingPromptHeuristics.backoffKind(for: candidate.provider, source: .runtimeApp),
-                    until: until
-                )
+                rawUntil = now.addingTimeInterval(fallbackInterval)
+                kind = MeetingPromptHeuristics.backoffKind(for: candidate.provider, source: .runtimeApp)
             }
+            until = MeetingPromptHeuristics.adHocDismissalDeadline(
+                rawUntil,
+                reason: candidate.reason,
+                now: now
+            )
+            decision = MeetingPromptBackoffDecision(kind: kind, until: until)
             suppressRuntimePrompts(for: candidate.provider, until: until, reason: decision.kind.rawValue)
         }
         snoozedUntil[candidate.id] = until
@@ -370,7 +385,7 @@ final class MeetingPromptDetector {
         candidates.append(contentsOf: micInputCandidates(now: now, frontmostBundleID: frontmostBundleID))
 
         let sortedCandidates = candidates.sorted(by: sortCandidates)
-        guard let match = preferredCandidate(from: sortedCandidates) else { return }
+        guard let match = preferredCandidate(from: sortedCandidates, now: now) else { return }
 
         if shouldSkipPromptEvaluation?() == true {
             recordSuppression(
@@ -690,7 +705,7 @@ final class MeetingPromptDetector {
 
         var candidates: [ScoredCandidate] = []
         for signal in signals {
-            if let suppressedUntil = runtimeSuppressedUntil[signal.provider], suppressedUntil > now {
+            if let suppressedUntil = adHocSuppressionDeadline(for: signal.provider), suppressedUntil > now {
                 recordSuppression(
                     candidate: micInputCandidate(for: signal.provider, reason: signal.reason, now: now).candidate,
                     reason: .runtimeSuppressed,
@@ -798,7 +813,7 @@ final class MeetingPromptDetector {
         "mic:\(provider.rawValue)"
     }
 
-    private func preferredCandidate(from sortedCandidates: [ScoredCandidate]) -> ScoredCandidate? {
+    private func preferredCandidate(from sortedCandidates: [ScoredCandidate], now: Date) -> ScoredCandidate? {
         guard let first = sortedCandidates.first else { return nil }
         guard first.candidate.reason.isAdHocCallSignal else { return first }
         let calendarCandidate = sortedCandidates.first {
@@ -806,13 +821,30 @@ final class MeetingPromptDetector {
                 $0.candidate.provider == first.candidate.provider
         }
         guard first.candidate.provider == .googleMeet else {
-            return calendarCandidate ?? first
+            guard let calendarCandidate else { return first }
+            // The calendar candidate carries the meeting title, so it wins while
+            // it can still prompt. Once it is snoozed or dismissed, preferring it
+            // silently killed the live-call prompt as well: evaluate() bails on
+            // the preferred candidate's cooldown and never reconsiders the
+            // ad-hoc one. Dismissing "starts in 1 min" should not also disable
+            // "you are in this call right now", so hand back to the live signal.
+            return hasActiveCooldown(for: calendarCandidate.candidate.id, now: now)
+                ? first
+                : calendarCandidate
         }
         return sortedCandidates.first {
             $0.candidate.source == .calendarEvent &&
                 $0.candidate.provider == first.candidate.provider &&
                 (pendingUntil[$0.candidate.id] != nil || snoozedUntil[$0.candidate.id] != nil)
         } ?? first
+    }
+
+    /// Whether `candidateID` is currently blocked by either cooldown map, i.e.
+    /// whether `evaluate()` would bail on it rather than prompt.
+    private func hasActiveCooldown(for candidateID: String, now: Date) -> Bool {
+        if let until = pendingUntil[candidateID], until > now { return true }
+        if let until = snoozedUntil[candidateID], until > now { return true }
+        return false
     }
 
     private func sortCandidates(_ lhs: ScoredCandidate, _ rhs: ScoredCandidate) -> Bool {
@@ -852,10 +884,28 @@ final class MeetingPromptDetector {
 
     private func suppressRuntimePrompts(for provider: MeetingPromptProvider, until: Date, reason: String?) {
         let existing = runtimeSuppressedUntil[provider] ?? .distantPast
-        runtimeSuppressedUntil[provider] = max(existing, until)
+        let extended = max(existing, until)
+        runtimeSuppressedUntil[provider] = extended
+        // Only stamp a fresh start when this write actually extends the window;
+        // re-stamping on a no-op write would keep pushing the ad-hoc cap out.
+        if extended > existing {
+            runtimeSuppressedFrom[provider] = Date()
+        }
         if let reason {
             runtimeSuppressionReasons[provider] = reason
         }
+    }
+
+    /// Provider suppression as seen by *ad-hoc live-call* candidates: capped
+    /// relative to when it was written, so a dismissed calendar reminder or a
+    /// long weak-signal backoff cannot silence a call in progress. Weak runtime
+    /// candidates keep reading `runtimeSuppressedUntil` directly.
+    private func adHocSuppressionDeadline(for provider: MeetingPromptProvider) -> Date? {
+        guard let until = runtimeSuppressedUntil[provider] else { return nil }
+        return MeetingPromptHeuristics.adHocSuppressionDeadline(
+            suppressedUntil: until,
+            suppressedFrom: runtimeSuppressedFrom[provider]
+        )
     }
 
     private func nextRuntimePromptResumeDate(for provider: MeetingPromptProvider, now: Date) -> Date? {
@@ -901,6 +951,7 @@ final class MeetingPromptDetector {
         snoozedUntil = snoozedUntil.filter { $0.value > now }
         pendingUntil = pendingUntil.filter { $0.value > now }
         runtimeSuppressedUntil = runtimeSuppressedUntil.filter { $0.value > now }
+        runtimeSuppressedFrom = runtimeSuppressedFrom.filter { runtimeSuppressedUntil[$0.key] != nil }
         cooldownReasons = cooldownReasons.filter { entry in
             (snoozedUntil[entry.key] ?? pendingUntil[entry.key]) != nil
         }

@@ -1,3 +1,5 @@
+Dev tier: 3 (public)
+
 ![Transcripted — meeting and dictation capture on macOS](docs/assets/transcripted-github-banner.png)
 
 # Transcripted
