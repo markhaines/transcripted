@@ -660,6 +660,7 @@ class TranscriptedAppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegat
 
             await AppTerminationSequence.run(AppTerminationSequence.Steps(
                 finishDictationForTermination: { await self.sessionController.finishDictationForTermination() },
+                finishWritingForTermination: { await self.appState.writingController.finishWritingForTermination() },
                 resetCleanupAdmission: { self.terminationCleanupStarted = false },
                 prepareMeetingForTermination: {
                     if #available(macOS 14.0, *) {

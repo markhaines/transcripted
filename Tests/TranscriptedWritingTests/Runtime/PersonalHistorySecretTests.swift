@@ -432,6 +432,7 @@ struct PersonalHistorySecretTests {
             self.relay = relay
             recorder = WritingDayFileRecorder(
                 directory: { writing },
+                pendingDirectory: { WritingDayFileStore.resolved(writing.deletingLastPathComponent()).appendingPathComponent("pending", isDirectory: true) },
                 gate: { gate.value },
                 appName: { _ in "App" },
                 now: { Date(timeIntervalSince1970: TimeInterval(clock.now) / 1_000) },

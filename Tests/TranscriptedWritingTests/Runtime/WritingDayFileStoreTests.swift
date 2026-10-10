@@ -262,6 +262,7 @@ struct WritingDayFileStoreTests {
         let writing = sandbox.writing
         return WritingDayFileRecorder(
             directory: { writing },
+            pendingDirectory: { WritingDayFileStore.resolved(sandbox.root).appendingPathComponent("pending", isDirectory: true) },
             gate: { gate.value },
             appName: { $0 == slack ? "Slack" : nil },
             now: { Self.date(clock.now) },

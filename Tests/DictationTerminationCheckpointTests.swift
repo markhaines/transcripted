@@ -208,6 +208,17 @@ func testDictationTerminationCheckpoint() async {
             "meeting prep, shutdown, input restore, and the event flush all finish before AppKit hears true"
         )
     }
+
+    await runSuite("App Quit refuses unresolved Writing before shutting down or stopping a meeting") { @MainActor in
+        let recorder = AppTerminationRecorder(dictationAdmits: true)
+        var steps = recorder.steps()
+        steps.finishWritingForTermination = { false }
+        assertFalse(await AppTerminationSequence.run(steps), "Writing must have durable ownership before Quit")
+        assertEqual(recorder.events, ["finishDictation", "resetAdmission", "reply:false"],
+                    "no teardown may discard Writing after a refused final flush")
+        steps.finishWritingForTermination = { true }
+        assertTrue(await AppTerminationSequence.run(steps), "a later durable flush admits Quit")
+    }
 }
 
 /// Records the app's Quit steps. Each async step yields first, so a step

@@ -182,6 +182,7 @@ struct WritingAppScopeTests {
         let relay = PersonalHistoryRelay(personalHistory: controller)
         let recorder = WritingDayFileRecorder(
             directory: { directory },
+            pendingDirectory: { WritingDayFileStore.resolved(directory.deletingLastPathComponent()).appendingPathComponent("pending", isDirectory: true) },
             gate: { .init(enabled: true, historyIdentifier: "history", consentIdentifier: "consent") },
             appName: { _ in "App" },
             releaseToPersonalHistory: { relay.send($0) }

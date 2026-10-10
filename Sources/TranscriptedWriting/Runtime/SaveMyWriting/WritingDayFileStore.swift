@@ -14,6 +14,8 @@ enum WritingDayFileStore {
         case folderUnavailable
         case unreadableDayFile
         case writeFailed
+        case pendingStoreUnavailable
+        case pendingStoreFull
     }
 
     /// The folder's own name inside the capture library.
@@ -24,13 +26,24 @@ enum WritingDayFileStore {
     /// Appends `section` to the day file named `fileName`, creating the file
     /// with `header` first when it doesn't exist. Returns the file's URL.
     @discardableResult
-    static func append(section: String, header: String, fileName: String, in directory: URL) throws -> URL {
+    static func append(section: String, header: String, fileName: String, in directory: URL, entryID: String? = nil) throws -> URL {
         guard isDayFileName(fileName) else { throw StoreError.writeFailed }
         let folder = resolved(directory)
         guard SecureLocalStorage.ensureOwnerOnlyDirectory(at: folder) else { throw StoreError.folderUnavailable }
         let destination = folder.appendingPathComponent(fileName, isDirectory: false)
 
         let existing = try existingContents(of: destination)
+        // Replay after a crash between publication and journal retirement:
+        // inspect metadata only, never a matching line inside the text body.
+        if let entryID, let existing,
+           let text = String(data: existing, encoding: .utf8),
+           text.components(separatedBy: "\n## ").dropFirst().contains(where: { section in
+               section.components(separatedBy: "\n\n").dropFirst().first?
+                   .components(separatedBy: "\n").contains("Entry ID: `\(entryID)`") == true
+           }) {
+            guard SecureLocalStorage.synchronizeOwnerOnlyDirectory(at: folder) else { throw StoreError.writeFailed }
+            return destination
+        }
         let contents = WritingDayFileFormatter.contents(appending: section, to: existing, header: header)
         try writeAtomically(contents, to: destination, in: folder)
         return destination
@@ -102,6 +115,7 @@ enum WritingDayFileStore {
             _ = SecureLocalStorage.removeOwnerOnlyFile(at: temporary)
             throw StoreError.writeFailed
         }
+        guard SecureLocalStorage.synchronizeOwnerOnlyDirectory(at: folder) else { throw StoreError.writeFailed }
     }
 
     /// Deletes every `Writing_*.md` in the writing folder, plus temporary files

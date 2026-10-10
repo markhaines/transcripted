@@ -16,6 +16,7 @@ import Foundation
 enum AppTerminationSequence {
     struct Steps {
         var finishDictationForTermination: @MainActor () async -> Bool
+        var finishWritingForTermination: @MainActor () async -> Bool = { true }
         var resetCleanupAdmission: @MainActor () -> Void
         var prepareMeetingForTermination: @MainActor () async -> Void
         var shutDownAppState: @MainActor () -> Void
@@ -32,6 +33,11 @@ enum AppTerminationSequence {
             // An unresolved audio checkpoint may be the only copy of this
             // recording. Leave stop/finalization in flight and let a later
             // Quit re-enter after replying to every pending request.
+            steps.resetCleanupAdmission()
+            steps.replyToPendingRequests(false)
+            return false
+        }
+        guard await steps.finishWritingForTermination() else {
             steps.resetCleanupAdmission()
             steps.replyToPendingRequests(false)
             return false

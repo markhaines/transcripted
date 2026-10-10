@@ -54,6 +54,13 @@ enum SecureLocalStorage {
         return true
     }
 
+    /// Makes a prior atomic rename/unlink durable before acknowledging ownership.
+    static func synchronizeOwnerOnlyDirectory(at directory: URL) -> Bool {
+        guard let descriptor = secureDirectoryDescriptor(at: directory) else { return false }
+        defer { close(descriptor) }
+        return fsync(descriptor) == 0
+    }
+
     /// Opens an existing private file for status without creating or tightening anything.
     static func openExistingOwnerOnlyFileForReadOnlyStatus(at file: URL) -> ReadOnlyStatusFile {
         let directory = file.deletingLastPathComponent()

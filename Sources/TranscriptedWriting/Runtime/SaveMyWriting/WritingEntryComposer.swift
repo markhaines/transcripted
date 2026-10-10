@@ -30,7 +30,7 @@ struct WritingEntryComposer {
     static let scrapMergeGapMilliseconds: Int64 = 60_000
 
     /// A closed entry, ready for the day file.
-    struct Entry: Equatable, Sendable {
+    struct Entry: Codable, Equatable, Sendable {
         let entryID: String
         let capturedAtMilliseconds: Int64
         let appBundleIdentifier: String
@@ -40,6 +40,7 @@ struct WritingEntryComposer {
         let wordCount: Int
         let characterCount: Int
         let acceptedWordCount: Int
+        let eventIDs: [String]
     }
 
     private struct Piece {
@@ -59,6 +60,7 @@ struct WritingEntryComposer {
         /// The typed and accepted events as the keyboard sent them, for
         /// Personal History. Never deletions: Personal History doesn't take them.
         var historyEvents: [PersonalHistoryEvent] = []
+        var eventIDs: [String] = []
 
         var text: String { pieces.map(\.text).joined() }
 
@@ -193,6 +195,29 @@ struct WritingEntryComposer {
         clearedHistory.removeAll()
     }
 
+    /// Privacy changes also apply to the still-open, memory-only entry. Once
+    /// excluded it must not return if a later preference widens the scope.
+    mutating func discardOpenEntryUnlessAdmitted(_ admits: (String, String, String) -> Bool) {
+        guard let open else { return }
+        if !admits(open.appBundleIdentifier, open.historyIdentifier, open.consentIdentifier) {
+            discardOpenEntry()
+        }
+    }
+
+    /// A failed directory sync can leave the closed journal published while
+    /// admission rolls RAM back. Finish exactly that close transition on reload:
+    /// keep secret-detection context, but never extend its already-owned Entry ID.
+    mutating func reconcileOwnedOpenEntry(_ entries: [Entry]) {
+        guard let open, !open.eventIDs.isEmpty,
+              entries.contains(where: {
+                  $0.entryID == open.entryID && $0.appBundleIdentifier == open.appBundleIdentifier
+                      && $0.historyIdentifier == open.historyIdentifier && $0.consentIdentifier == open.consentIdentifier
+                      && $0.capturedAtMilliseconds == open.firstTimestampMilliseconds
+                      && Set(open.eventIDs).isSubset(of: Set($0.eventIDs))
+              }) else { return }
+        _ = closeOpen()
+    }
+
     private mutating func closeOpen() -> Entry? {
         guard let entry = open else { return nil }
         open = nil
@@ -234,7 +259,8 @@ struct WritingEntryComposer {
             acceptedWordCount: min(
                 wordCount,
                 entry.pieces.filter(\.accepted).reduce(0) { $0 + Self.wordCount($1.text) }
-            )
+            ),
+            eventIDs: entry.eventIDs
         )
     }
 
@@ -326,6 +352,7 @@ struct WritingEntryComposer {
     }
 
     private static func apply(_ event: PersonalHistoryEvent, to entry: inout OpenEntry) {
+        entry.eventIDs.append(event.id)
         switch event.source {
         case .typed:
             entry.append(event.text, accepted: false)

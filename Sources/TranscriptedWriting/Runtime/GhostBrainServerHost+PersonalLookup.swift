@@ -5,6 +5,11 @@ import Foundation
 import Security
 
 extension GhostBrainServerHost {
+    static func personalHistoryResponse(_ events: [PersonalHistoryEvent],
+                                        ingest: any PersonalHistoryIngesting) async -> GhostBrainResponse {
+        await ingest.recordingResponse(events)
+    }
+
     /// The personal model must only ever see finished words. Mid-word
     /// requests (cursor inside a word, no trailing whitespace) now do reach
     /// here — `acceptsCompletionContext` lets them through whenever the

@@ -57,6 +57,13 @@ extension WritingController {
             settings.personalHistoryConsentIdentifier = UUID().uuidString
             settings.personalHistoryEnabled = enabled
         }
+        if let recorder = runtime?.dayFiles.recorder {
+            recorder.enqueuePrivacyReconciliation()
+        } else {
+            WritingDayFileRecorder.reconcileStoredPrivacy(in: writingPendingDirectory(),
+                gate: .init(preferences: Self.preferences()),
+                failed: { DiagnosticsLog.shared.record("writing-pending-privacy-erase-failed") })
+        }
     }
 
     /// Tilde's suggestions switch. Saves only; `applyRunState()` then starts
@@ -89,6 +96,13 @@ extension WritingController {
     /// suggestions. The keyboard picks it up on its next key.
     func setAppScope(_ scope: WritingAppScope) {
         Self.preferences().appScope = scope
+        if let recorder = runtime?.dayFiles.recorder {
+            recorder.enqueuePrivacyReconciliation()
+        } else {
+            WritingDayFileRecorder.reconcileStoredPrivacy(in: writingPendingDirectory(),
+                gate: .init(preferences: Self.preferences()),
+                failed: { DiagnosticsLog.shared.record("writing-pending-privacy-erase-failed") })
+        }
         applyFrontWindowWatch()
     }
 
@@ -111,9 +125,13 @@ extension WritingController {
         if !TildeLocalOutcomeStores.deleteAll() { deleted = false }
         let recorder = runtime?.dayFiles.recorder
         let directory = writingDirectory
-        let filesDeleted = await Task.detached(priority: .userInitiated) {
-            recorder?.deleteAll() ?? WritingDayFileStore.deleteAll(in: directory())
-        }.value
+        let pendingDirectory = writingPendingDirectory
+        let filesDeleted: Bool
+        if let recorder {
+            filesDeleted = await Task.detached(priority: .userInitiated) { recorder.deleteAll() }.value
+        } else {
+            filesDeleted = await WritingDayFileRecorder.deleteStoredWriting(in: directory(), pendingDirectory: pendingDirectory())
+        }
         log("WRITING | delete all writing: \(deleted && filesDeleted ? "done" : "incomplete")")
         return deleted && filesDeleted
     }
