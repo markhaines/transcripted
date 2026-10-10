@@ -316,9 +316,13 @@ struct SpeakerVoiceToNameRow: View {
         )
         model.namePendingReviewItem(group.representative, to: nameDraft) { didSave in
             isSaving = false
-            if didSave {
+            if let kept = SpeakerReviewNamedRetention.retainedVoice(
+                after: .typedName,
+                didSave: didSave,
+                named: savedProgress(named)
+            ) {
                 nameDraft = ""
-                onNamed?(savedProgress(named))
+                onNamed?(kept)
             } else {
                 saveErrorMessage = "Couldn't save — the meeting file may have moved."
             }
@@ -343,9 +347,13 @@ struct SpeakerVoiceToNameRow: View {
         )
         model.mergePendingReviewItem(group.representative, into: person) { didSave in
             isSaving = false
-            if didSave {
+            if let kept = SpeakerReviewNamedRetention.retainedVoice(
+                after: .joinedSavedPerson,
+                didSave: didSave,
+                named: savedProgress(named)
+            ) {
                 nameDraft = ""
-                onNamed?(savedProgress(named))
+                onNamed?(kept)
             } else {
                 saveErrorMessage = "Couldn't save — the meeting file may have moved."
             }
@@ -368,9 +376,32 @@ struct SpeakerVoiceToNameRow: View {
         guard !isSaving, !isMarkingAsMe else { return }
         isMarkingAsMe = true
         saveErrorMessage = nil
-        model.markPendingReviewItemAsMe(group.representative) { didSave in
+        let voice = group.representative
+        let existingOwner = model.profiles.first {
+            $0.id != voice.speakerId && SpeakerNameSelectionPolicy.isOwnerLabel($0.displayName ?? "")
+        }
+        let standing = existingOwner.flatMap { model.namingStanding(for: $0) }
+        let named = SpeakerReviewNamedRetention.thisIsMe(
+            voiceID: voice.speakerId,
+            existingOwner: existingOwner.map {
+                SpeakerReviewNamedRetention.Owner(
+                    id: $0.id,
+                    name: $0.displayName ?? SpeakerNameSelectionPolicy.ownerLabel,
+                    confirmedMeetings: standing?.confirmedMeetings ?? max(0, $0.confirmedMeetingCount),
+                    requiredMeetings: standing?.requiredMeetings ?? SpeakerNamingTierPresentation.segmentCount,
+                    isTrusted: standing?.isTrusted ?? true
+                )
+            }
+        )
+        model.markPendingReviewItemAsMe(voice) { didSave in
             isMarkingAsMe = false
-            if !didSave {
+            if let kept = SpeakerReviewNamedRetention.retainedVoice(
+                after: .markedAsMe,
+                didSave: didSave,
+                named: savedProgress(named)
+            ) {
+                onNamed?(kept)
+            } else {
                 saveErrorMessage = "Couldn't save — the meeting file may have moved."
             }
         }

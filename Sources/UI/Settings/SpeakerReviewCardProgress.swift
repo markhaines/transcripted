@@ -114,3 +114,63 @@ enum SpeakerReviewCardProgress {
         )
     }
 }
+
+/// A successful naming stays on the review card. The queue refresh drops
+/// the unnamed row; the parent only holds the call and appends the named
+/// row when this returns the voice.
+enum SpeakerReviewNamedRetention {
+    enum Action: Equatable {
+        case typedName
+        case joinedSavedPerson
+        case markedAsMe
+    }
+
+    struct Owner {
+        let id: UUID
+        let name: String
+        let confirmedMeetings: Int
+        let requiredMeetings: Int
+        let isTrusted: Bool
+    }
+
+    /// "This is me" is a naming: You, either as a new person or joined to
+    /// the existing owner.
+    static func thisIsMe(
+        voiceID: UUID,
+        existingOwner: Owner?,
+        requiredMeetings: Int = SpeakerNamingTierPresentation.segmentCount
+    ) -> SpeakerReviewNamedVoice {
+        if let owner = existingOwner {
+            return SpeakerReviewNamedVoice(
+                voiceID: voiceID,
+                personID: owner.id,
+                name: owner.name,
+                confirmedBefore: owner.confirmedMeetings,
+                requiredMeetings: owner.requiredMeetings,
+                isNewPerson: false,
+                isTrusted: owner.isTrusted
+            )
+        }
+        return SpeakerReviewNamedVoice(
+            voiceID: voiceID,
+            personID: voiceID,
+            name: SpeakerNameSelectionPolicy.ownerLabel,
+            confirmedBefore: 0,
+            requiredMeetings: requiredMeetings,
+            isNewPerson: true,
+            isTrusted: true
+        )
+    }
+
+    static func retainedVoice(
+        after action: Action,
+        didSave: Bool,
+        named: SpeakerReviewNamedVoice
+    ) -> SpeakerReviewNamedVoice? {
+        guard didSave else { return nil }
+        switch action {
+        case .typedName, .joinedSavedPerson, .markedAsMe:
+            return named
+        }
+    }
+}
