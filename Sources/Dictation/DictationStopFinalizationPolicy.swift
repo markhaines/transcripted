@@ -98,6 +98,25 @@ enum DictationDeliveryPresentation: Equatable {
     case error(String)
 
     static let likelyPastedAutoSendNotice = "Pasted. Press Return to send it."
+    static let pendingAudioNotice = "The recording is safe locally, but saving its audio needs repair."
+
+    /// Audio retention must not take away Copy, Paste, or an Auto Enter warning.
+    /// Only a successful paste has no immediate delivery-recovery action to lose.
+    var canOfferAudioRetentionRetry: Bool {
+        if case .success = self { return true }
+        return false
+    }
+
+    func addingPendingAudioNotice(_ pending: Bool) -> Self {
+        guard pending else { return self }
+        switch self {
+        case .success: return self
+        case .clipboardNotice(let message): return .clipboardNotice("\(message) \(Self.pendingAudioNotice)")
+        case .notPasted(let message, let unconfirmed): return .notPasted(message: "\(message) \(Self.pendingAudioNotice)", unconfirmed: unconfirmed)
+        case .clipboardBusy(let message): return .clipboardBusy(message: "\(message) \(Self.pendingAudioNotice)")
+        case .error(let message): return .error("\(message) \(Self.pendingAudioNotice)")
+        }
+    }
 
     static func resolve(
         outcome: TextPasteOutcome,

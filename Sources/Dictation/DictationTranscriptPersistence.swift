@@ -6,6 +6,14 @@ struct DictationTranscriptPersistenceResult: Sendable {
     let failureError: Error?
     let startedAt: CFAbsoluteTime
     let finishedAt: CFAbsoluteTime
+    /// Text committed, but the requested audio is still in its private checkpoint.
+    /// Retrying this outcome must archive audio only, never append the text again.
+    var pendingAudioRetention: DictationStoppedAudioRecovery? = nil
+
+    var audioRetentionFailureMessage: String? {
+        pendingAudioRetention == nil ? nil
+            : "Your text is saved. The recording is safe locally, but couldn't be moved to your save location. Check storage, then Retry Saving Audio."
+    }
 
     var failureMessage: String? {
         guard failureError != nil else { return nil }
@@ -80,13 +88,14 @@ enum DictationSessionCapSavePolicy {
         case error(String)
     }
 
-    static func presentation(saveFailureMessage: String?) -> Presentation {
+    static func presentation(saveFailureMessage: String?, audioRetentionPending: Bool = false) -> Presentation {
         if let saveFailureMessage {
             return .error(saveFailureMessage)
         }
         // There's no paste-last shortcut any more; Dictations keeps the text.
         return .savedNotice(
-            message: "Saved to Markdown. Paste it now, or find it later in Dictations.",
+            message: "Saved to Markdown. Paste it now, or find it later in Dictations."
+                + (audioRetentionPending ? " \(DictationDeliveryPresentation.pendingAudioNotice)" : ""),
             actionTitle: "Paste It"
         )
     }

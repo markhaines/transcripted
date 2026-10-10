@@ -5,6 +5,26 @@
 
 import Foundation
 
+private final class DictationArchiveFailureFileManager: FileManager, @unchecked Sendable {
+    enum Failure { case copy, publish, removeCheckpoint }
+    let failure: Failure
+    init(_ failure: Failure) { self.failure = failure; super.init() }
+    override func copyItem(at srcURL: URL, to dstURL: URL) throws {
+        if failure == .copy { throw CocoaError(.fileWriteOutOfSpace) }
+        try super.copyItem(at: srcURL, to: dstURL)
+    }
+    override func moveItem(at srcURL: URL, to dstURL: URL) throws {
+        if failure == .publish { throw CocoaError(.fileWriteNoPermission) }
+        try super.moveItem(at: srcURL, to: dstURL)
+    }
+    override func removeItem(at URL: URL) throws {
+        if failure == .removeCheckpoint, URL.lastPathComponent.hasPrefix("dictation_"), URL.pathExtension == "wav" {
+            throw CocoaError(.fileWriteNoPermission)
+        }
+        try super.removeItem(at: URL)
+    }
+}
+
 func testDictationAudioArchive() async {
     let fm = FileManager.default
 
@@ -145,7 +165,7 @@ func testDictationAudioArchive() async {
             3,
             "the undo window keeps the audio so Undo can bring the entry back whole"
         )
-        DictationAudioArchive.deleteKeptAudio(for: doomed)
+        DictationAudioArchive.deleteKeptAudio(for: doomed, recoveryDirectory: root.appendingPathComponent("recovery"))
         assertEqual(
             Set((try? fm.contentsOfDirectory(atPath: audio.path)) ?? []),
             ["\(other).m4a"],
@@ -450,6 +470,190 @@ func testDictationAudioArchive() async {
     }
 
     // MARK: Setting
+
+    runSuite("Archive failure preserves a short take across launch and retries audio without duplicating text") {
+        let root = makeRoot("failed-archive-restart")
+        defer { try? fm.removeItem(at: root) }
+        let recoveryFolder = root.appendingPathComponent("recovery")
+        let dictations = root.appendingPathComponent("dictations")
+        let created = Date(timeIntervalSince1970: 1_790_000_000)
+        guard let recovery = try? DictationStoppedAudioRecoveryStore.persist(
+            samples16k: [0.1, -0.1], sessionID: UUID(), createdAt: created,
+            retentionRequested: true, directory: recoveryFolder
+        ) else { return assertTrue(false, "checkpoint saved") }
+        write("blocked", to: dictations.appendingPathComponent("audio"))
+        var compressed: [URL] = []
+        let result = DictationStoppedAudioRecoveryStore.saveTranscriptAndRetire(
+            recovery: recovery, keepWindow: .thirtyDays, dictationsFolder: dictations,
+            compressKeptAudio: { compressed.append($0) }
+        ) { path in
+            try DictationTranscriptWriter.save(text: "synthetic retained take", sourceAppName: "Synthetic", sourceBundleID: nil,
+                                              delivery: .pasted, createdAt: created, directory: dictations, audioRelativePath: path)
+        }
+        assertNotNil(result.saved, "text commits despite archive failure")
+        assertNil(result.failureMessage, "text success is not mislabeled as text failure")
+        assertNotNil(result.audioRetentionFailureMessage, "audio failure is a distinct outcome")
+        assertEqual(result.pendingAudioRetention, recovery)
+        assertTrue(fm.fileExists(atPath: recovery.url.path), "only recording survives")
+        assertEqual(DictationStoppedAudioRecoveryStore.purgeLeftovers(createdBefore: created.addingTimeInterval(60), directory: recoveryFolder), 0)
+        let path = DictationAudioArchive.relativePath(for: recovery.sessionID)
+        assertEqual(DictationAudioArchive.resolveURL(relativePath: path, dictationsFolder: dictations, recoveryDirectory: recoveryFolder), recovery.url)
+        guard let saved = result.saved, let before = try? Data(contentsOf: saved.url) else { return assertTrue(false, "text exists") }
+        try? fm.removeItem(at: dictations.appendingPathComponent("audio"))
+        assertEqual(DictationStoppedAudioRecoveryStore.retryPendingAudioRetention(
+            directory: recoveryFolder, window: .thirtyDays, now: created.addingTimeInterval(60), compressKeptAudio: { compressed.append($0) }
+        ), 1)
+        assertEqual(DictationStoppedAudioRecoveryStore.retryPendingAudioRetention(
+            directory: recoveryFolder, window: .thirtyDays, now: created.addingTimeInterval(60), compressKeptAudio: { compressed.append($0) }
+        ), 0, "repeated restart is idempotent")
+        assertEqual(try? Data(contentsOf: saved.url), before, "audio repair never appends Markdown")
+        assertEqual(compressed.count, 1, "only the committed archive reaches compression")
+        assertFalse(fm.fileExists(atPath: recovery.url.path))
+        assertEqual(DictationStoppedAudioRecoveryStore.pendingRecoveries(directory: recoveryFolder).count, 0)
+        assertNotNil(DictationAudioArchive.resolveURL(relativePath: path, dictationsFolder: dictations))
+    }
+
+    runSuite("Copy publication and checkpoint-retirement failures all keep a recoverable recording") {
+        for failure in [DictationArchiveFailureFileManager.Failure.copy, .publish, .removeCheckpoint] {
+            let root = makeRoot("failure-stage")
+            defer { try? fm.removeItem(at: root) }
+            let dictations = root.appendingPathComponent("dictations")
+            guard let recovery = makeRecovery(in: root) else { return assertTrue(false, "checkpoint saved") }
+            let result = DictationStoppedAudioRecoveryStore.saveTranscriptAndRetire(
+                recovery: recovery, keepWindow: .forever, dictationsFolder: dictations,
+                fileManager: DictationArchiveFailureFileManager(failure), compressKeptAudio: { _ in }
+            ) { path in
+                try DictationTranscriptWriter.save(text: "synthetic failure", sourceAppName: "Synthetic", sourceBundleID: nil,
+                                                  delivery: .pasted, directory: dictations, audioRelativePath: path)
+            }
+            assertNotNil(result.saved)
+            assertNotNil(result.pendingAudioRetention)
+            assertTrue(fm.fileExists(atPath: recovery.url.path))
+            assertEqual(DictationStoppedAudioRecoveryStore.retryPendingAudioRetention(
+                directory: recovery.url.deletingLastPathComponent(), window: .forever, compressKeptAudio: { _ in }
+            ), 1, "a repaired filesystem completes the same retained take")
+        }
+    }
+
+    runSuite("Write-ahead receipt failure does not commit text or expose a short checkpoint to purge") {
+        let root = makeRoot("receipt-failure")
+        defer { try? fm.removeItem(at: root) }
+        let created = Date(timeIntervalSinceReferenceDate: 100)
+        guard let recovery = try? DictationStoppedAudioRecoveryStore.persist(
+            samples16k: [0.1], sessionID: UUID(), createdAt: created, retentionRequested: true, directory: root
+        ) else { return assertTrue(false, "checkpoint saved") }
+        let metadata = recovery.url.deletingPathExtension().appendingPathExtension("json")
+        // Make the metadata destination unavailable without changing real TCC,
+        // permissions or storage. The prior retention owner was checkpointed.
+        try? fm.removeItem(at: metadata)
+        try? fm.createDirectory(at: metadata, withIntermediateDirectories: false)
+        var saves = 0
+        let result = DictationStoppedAudioRecoveryStore.saveTranscriptAndRetire(
+            recovery: recovery, keepWindow: .thirtyDays, dictationsFolder: root.appendingPathComponent("library"), compressKeptAudio: { _ in }
+        ) { _ in saves += 1; return SavedDictationTranscript(url: root.appendingPathComponent("day.md"), title: "Synthetic") }
+        assertEqual(saves, 0, "no successful transcript points at unowned audio")
+        assertNotNil(result.failureError)
+        assertEqual(DictationStoppedAudioRecoveryStore.purgeLeftovers(createdBefore: created.addingTimeInterval(100), directory: root), 0)
+        assertTrue(fm.fileExists(atPath: recovery.url.path))
+    }
+
+    runSuite("Pending retention cannot replace a different same-named archive file") {
+        let root = makeRoot("existing-destination")
+        defer { try? fm.removeItem(at: root) }
+        guard let recovery = makeRecovery(in: root) else { return assertTrue(false, "checkpoint saved") }
+        let dictations = root.appendingPathComponent("dictations")
+        let destination = DictationAudioArchive.audioFolder(in: dictations).appendingPathComponent("\(recovery.sessionID.uuidString.lowercased()).wav")
+        write("different bytes", to: destination)
+        let before = try? Data(contentsOf: destination)
+        let result = DictationStoppedAudioRecoveryStore.saveTranscriptAndRetire(
+            recovery: recovery, keepWindow: .forever, dictationsFolder: dictations, compressKeptAudio: { _ in }
+        ) { _ in SavedDictationTranscript(url: root.appendingPathComponent("day.md"), title: "Synthetic") }
+        assertNotNil(result.pendingAudioRetention)
+        assertEqual(try? Data(contentsOf: destination), before)
+        assertTrue(fm.fileExists(atPath: recovery.url.path))
+    }
+
+    runSuite("Restart recognizes an already-published archive by content not just its UUID") {
+        for matches in [true, false] {
+            let root = makeRoot("published-before-crash")
+            defer { try? fm.removeItem(at: root) }
+            guard let recovery = makeRecovery(in: root) else { return assertTrue(false, "checkpoint saved") }
+            let dictations = root.appendingPathComponent("dictations")
+            write("blocked", to: dictations.appendingPathComponent("audio"))
+            _ = DictationStoppedAudioRecoveryStore.saveTranscriptAndRetire(
+                recovery: recovery, keepWindow: .forever, dictationsFolder: dictations, compressKeptAudio: { _ in }
+            ) { _ in SavedDictationTranscript(url: root.appendingPathComponent("day.md"), title: "Synthetic") }
+            try? fm.removeItem(at: dictations.appendingPathComponent("audio"))
+            let archived = DictationAudioArchive.audioFolder(in: dictations).appendingPathComponent("\(recovery.sessionID.uuidString.lowercased()).wav")
+            try? fm.createDirectory(at: archived.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if matches { try? fm.copyItem(at: recovery.url, to: archived) } else { write("not this take", to: archived) }
+            try? fm.removeItem(at: recovery.url)
+            var compressed = 0
+            assertEqual(DictationStoppedAudioRecoveryStore.retryPendingAudioRetention(
+                directory: recovery.url.deletingLastPathComponent(), window: .forever, compressKeptAudio: { _ in compressed += 1 }
+            ), matches ? 1 : 0)
+            assertEqual(compressed, matches ? 1 : 0)
+            assertEqual(fm.fileExists(atPath: recovery.url.deletingPathExtension().appendingPathExtension("json").path), !matches,
+                        "only the matching archive retires the durable receipt")
+        }
+    }
+
+    runSuite("Deleted Off and expired pending audio cannot be resurrected on retry") {
+        for mode in 0..<3 {
+            let root = makeRoot("pending-privacy")
+            defer { try? fm.removeItem(at: root) }
+            let recoveryFolder = root.appendingPathComponent("recovery")
+            let dictations = root.appendingPathComponent("dictations")
+            let created = Date(timeIntervalSince1970: 1_790_000_000)
+            guard let recovery = try? DictationStoppedAudioRecoveryStore.persist(
+                samples16k: [0.1], sessionID: UUID(), createdAt: created, retentionRequested: true, directory: recoveryFolder
+            ) else { return assertTrue(false, "checkpoint saved") }
+            write("blocked", to: dictations.appendingPathComponent("audio"))
+            let result = DictationStoppedAudioRecoveryStore.saveTranscriptAndRetire(
+                recovery: recovery, keepWindow: .sevenDays, dictationsFolder: dictations, compressKeptAudio: { _ in }
+            ) { _ in SavedDictationTranscript(url: root.appendingPathComponent("day.md"), title: "Synthetic") }
+            assertNotNil(result.pendingAudioRetention)
+            let path = DictationAudioArchive.relativePath(for: recovery.sessionID)
+            if mode == 0 {
+                assertEqual(DictationAudioArchive.deleteKeptAudio(relativePath: path, dictationsFolder: dictations, recoveryDirectory: recoveryFolder), 1)
+            } else {
+                assertEqual(DictationStoppedAudioRecoveryStore.retryPendingAudioRetention(
+                    directory: recoveryFolder, window: mode == 1 ? .off : .sevenDays,
+                    now: created.addingTimeInterval(8 * 86_400), compressKeptAudio: { _ in assertTrue(false, "expired/Off never archives") }
+                ), 1)
+            }
+            try? fm.removeItem(at: dictations.appendingPathComponent("audio"))
+            assertEqual(DictationStoppedAudioRecoveryStore.retryPendingAudioRetention(
+                directory: recoveryFolder, window: .forever, compressKeptAudio: { _ in assertTrue(false, "no resurrection") }
+            ), 0)
+            assertFalse(fm.fileExists(atPath: recovery.url.path))
+            assertNil(DictationAudioArchive.resolveURL(relativePath: path, dictationsFolder: dictations, recoveryDirectory: recoveryFolder))
+        }
+    }
+
+    runSuite("Pending playback rejects a different library malformed receipts and symlinked audio") {
+        let root = makeRoot("pending-scope")
+        defer { try? fm.removeItem(at: root) }
+        guard let recovery = makeRecovery(in: root) else { return assertTrue(false, "checkpoint saved") }
+        let dictations = root.appendingPathComponent("dictations")
+        write("blocked", to: dictations.appendingPathComponent("audio"))
+        _ = DictationStoppedAudioRecoveryStore.saveTranscriptAndRetire(
+            recovery: recovery, keepWindow: .forever, dictationsFolder: dictations, compressKeptAudio: { _ in }
+        ) { _ in SavedDictationTranscript(url: root.appendingPathComponent("day.md"), title: "Synthetic") }
+        let directory = recovery.url.deletingLastPathComponent()
+        let path = DictationAudioArchive.relativePath(for: recovery.sessionID)
+        assertNil(DictationStoppedAudioRecoveryStore.pendingAudioURL(relativePath: path, dictationsFolder: root, directory: directory))
+        let foreign = root.appendingPathComponent("foreign.wav")
+        try? fm.moveItem(at: recovery.url, to: foreign)
+        try? fm.createSymbolicLink(at: recovery.url, withDestinationURL: foreign)
+        assertNil(DictationStoppedAudioRecoveryStore.pendingAudioURL(relativePath: path, dictationsFolder: dictations, directory: directory))
+        assertEqual(DictationStoppedAudioRecoveryStore.retryPendingAudioRetention(directory: directory, window: .off, compressKeptAudio: { _ in }), 0)
+        assertTrue(fm.fileExists(atPath: foreign.path), "foreign link target is untouched")
+        try? fm.removeItem(at: recovery.url)
+        try? fm.moveItem(at: foreign, to: recovery.url)
+        write("malformed", to: recovery.url.deletingPathExtension().appendingPathExtension("json"))
+        assertNil(DictationStoppedAudioRecoveryStore.pendingAudioURL(relativePath: path, dictationsFolder: dictations, directory: directory))
+    }
 
     runSuite("Dictation audio is kept for 30 days unless the user picks otherwise") {
         let suite = "DictationAudioArchiveTests-\(UUID().uuidString)"

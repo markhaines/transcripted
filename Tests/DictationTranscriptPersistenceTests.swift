@@ -8,6 +8,24 @@ private final class DictationCompletionTestState {
 }
 
 func testDictationTranscriptPersistence() async {
+    runSuite("Pending audio retention keeps delivery recovery controls and the cap Paste It action") {
+        let pending = DictationDeliveryPresentation.pendingAudioNotice
+        let presentations: [DictationDeliveryPresentation] = [
+            .notPasted(message: "Paste these words", unconfirmed: true),
+            .clipboardBusy(message: "Copy these words"),
+            .clipboardNotice("Press Return"), .error("Auto Enter failed")
+        ]
+        for presentation in presentations {
+            assertFalse(presentation.canOfferAudioRetentionRetry, "audio retry must not replace delivery recovery")
+        }
+        assertEqual(presentations[0].addingPendingAudioNotice(true), .notPasted(message: "Paste these words \(pending)", unconfirmed: true))
+        assertEqual(presentations[1].addingPendingAudioNotice(true), .clipboardBusy(message: "Copy these words \(pending)"))
+        assertEqual(presentations[2].addingPendingAudioNotice(true), .clipboardNotice("Press Return \(pending)"))
+        assertEqual(presentations[3].addingPendingAudioNotice(true), .error("Auto Enter failed \(pending)"))
+        assertTrue(DictationDeliveryPresentation.success(title: "Pasted").canOfferAudioRetentionRetry)
+        assertEqual(DictationSessionCapSavePolicy.presentation(saveFailureMessage: nil, audioRetentionPending: true),
+                    .savedNotice(message: "Saved to Markdown. Paste it now, or find it later in Dictations. \(pending)", actionTitle: "Paste It"))
+    }
     runSuite("Session-cap completion labels a failed Markdown save as failed delivery") {
         let saved = DictationSessionCapCompletionTelemetryPolicy.snapshot(saveSucceeded: true)
         assertEqual(saved.delivery.rawValue, "saved_without_paste", "durable session-cap Markdown may use saved-without-paste delivery")

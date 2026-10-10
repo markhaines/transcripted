@@ -62,7 +62,9 @@ extension DictationSessionController {
         )
         // Hitting the 15-minute cap still saved the text: a notice, not an
         // error with a warning triangle and a shake.
-        switch DictationSessionCapSavePolicy.presentation(saveFailureMessage: saveFailureMessage) {
+        switch DictationSessionCapSavePolicy.presentation(
+            saveFailureMessage: saveFailureMessage, audioRetentionPending: saveResult.pendingAudioRetention != nil
+        ) {
         case .error(let message):
             overlayController.showError(message)
         case .savedNotice(let message, let actionTitle):
@@ -100,7 +102,8 @@ extension DictationSessionController {
         let sourceBundleID = sessionSourceApp?.bundleIdentifier
         let result = DictationStoppedAudioRecoveryStore.saveTranscriptAndRetire(
             recovery: recovery,
-            keepWindow: AudioStoragePreferences.dictationAudioKeepWindow()
+            keepWindow: AudioStoragePreferences.dictationAudioKeepWindow(),
+            currentKeepWindow: { AudioStoragePreferences.dictationAudioKeepWindow() }
         ) { audioRelativePath in
             try DictationTranscriptWriter.save(
                 text: text, sourceAppName: sourceAppName, sourceBundleID: sourceBundleID,
@@ -115,12 +118,16 @@ extension DictationSessionController {
         transcriptPersisted: Bool = false,
         explicitDiscard: Bool = false
     ) {
-        guard DictationStoppedAudioRecoveryStore.cleanup(
-            stoppedAudioRecovery,
-            transcriptPersisted: transcriptPersisted,
-            explicitDiscard: explicitDiscard
-        ) else { return }
+        guard transcriptPersisted || explicitDiscard, let recovery = stoppedAudioRecovery else { return }
+        // Cancel/escape must not wait on another take's external-volume copy
+        // or fsync. Detach only this captured checkpoint; never reread mutable
+        // controller state when the storage owner becomes available.
         stoppedAudioRecovery = nil
+        Task.detached(priority: .utility) {
+            _ = DictationStoppedAudioRecoveryStore.cleanup(
+                recovery, transcriptPersisted: transcriptPersisted, explicitDiscard: explicitDiscard
+            )
+        }
     }
 
     func startPersistingDictationTranscript(
@@ -136,7 +143,8 @@ extension DictationSessionController {
             // Retire (or keep) only this writer's checkpoint, even if a new session has started.
             DictationStoppedAudioRecoveryStore.saveTranscriptAndRetire(
                 recovery: recovery,
-                keepWindow: keepWindow
+                keepWindow: keepWindow,
+                currentKeepWindow: { AudioStoragePreferences.dictationAudioKeepWindow() }
             ) { audioRelativePath in
                 try DictationTranscriptWriter.save(
                     text: text,
@@ -194,6 +202,31 @@ extension DictationSessionController {
             "duration_bucket": AnalyticsReporter.durationBucket(seconds: CFAbsoluteTimeGetCurrent() - sessionStartTime),
             "word_count_bucket": AnalyticsReporter.wordCountBucket(text.split(whereSeparator: \.isWhitespace).count),
         ])
+    }
+
+    /// This is separate from text-save failure: the completed Markdown and
+    /// paste outcome stay true. Retry never starts capture or appends text.
+    func showPendingAudioRetention(_ result: DictationTranscriptPersistenceResult) {
+        guard let recovery = result.pendingAudioRetention,
+              let message = result.audioRetentionFailureMessage else { return }
+        overlayController?.showError(message, actionTitle: "Retry Saving Audio", action: { [weak self] in
+            let window = AudioStoragePreferences.dictationAudioKeepWindow()
+            Task { @MainActor [weak self] in
+                let retried = await Task.detached(priority: .utility) {
+                    DictationStoppedAudioRecoveryStore.retryRetainedAudio(
+                        recovery: recovery, afterSaving: result, window: window,
+                        currentKeepWindow: { AudioStoragePreferences.dictationAudioKeepWindow() }
+                    )
+                }.value
+                guard let self, self.currentDictationSessionID == recovery.sessionID, !self.isDictating else { return }
+                if retried, !FileManager.default.fileExists(atPath: recovery.url.path) {
+                    let keepsAudio = AudioStoragePreferences.dictationAudioKeepWindow().keepsAudio
+                    self.overlayController?.showSuccessAndDismiss(title: keepsAudio ? "Audio saved" : "Audio removed")
+                } else {
+                    self.showPendingAudioRetention(result)
+                }
+            }
+        })
     }
 
     private func recordDictationTranscriptSaved(
