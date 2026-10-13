@@ -211,10 +211,12 @@ extension DictationSessionController {
                     snapshot: { await appState.sttRouter.snapshotRecordedSamplesForPersistence() },
                     checkpointWork: { recording in
                         let samples16k = recording.samples16k
+                        let retentionRequested = AudioStoragePreferences.dictationAudioKeepWindow().keepsAudio
                         return {
                             try DictationStoppedAudioRecoveryStore.persist(
                                 samples16k: samples16k,
-                                sessionID: taskSessionID
+                                sessionID: taskSessionID,
+                                retentionRequested: retentionRequested
                             )
                         }
                     },
@@ -506,12 +508,13 @@ extension DictationSessionController {
                 saveSucceeded: saveFailureMessage == nil,
                 elapsedSeconds: CFAbsoluteTimeGetCurrent() - sessionStartTime
             )
-            switch DictationDeliveryPresentation.resolve(
+            let deliveryPresentation = DictationDeliveryPresentation.resolve(
                 outcome: pasteOutcome,
                 saveFailureMessage: saveFailureMessage,
                 autoSend: autoSendOutcome,
                 autoSendExpected: self.autoSendRequestDecision.expected
-            ) {
+            ).addingPendingAudioNotice(saveResult.pendingAudioRetention != nil)
+            switch deliveryPresentation {
             case .success(let title):
                 overlayController.showSuccessAndDismiss(title: title)
             case .clipboardNotice(let message):
@@ -532,6 +535,7 @@ extension DictationSessionController {
             case .error(let message):
                 overlayController.showError(message)
             }
+            if deliveryPresentation.canOfferAudioRetentionRetry { self.showPendingAudioRetention(saveResult) }
             isDictating = false
             appState.logger.log("DICTATION | completed with outcome \(pasteOutcome)")
             if case .failed(let failure) = autoSendOutcome {

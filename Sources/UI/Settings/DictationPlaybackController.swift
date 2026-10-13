@@ -203,7 +203,10 @@ final class DictationAudioInfoStore: ObservableObject {
         var attempt = 0
         while true {
             let info = await Task.detached(priority: .utility) {
-                guard let url = DictationAudioArchive.resolveURL(relativePath: relativePath, dictationsFolder: folder) else {
+                guard let url = DictationAudioArchive.resolveURL(
+                    relativePath: relativePath, dictationsFolder: folder,
+                    recoveryDirectory: DictationStoppedAudioRecoveryStore.defaultDirectory
+                ) else {
                     return Info(isAvailable: false, duration: nil)
                 }
                 return Info(isAvailable: true, duration: Self.duration(of: url))
@@ -221,7 +224,8 @@ final class DictationAudioInfoStore: ObservableObject {
         guard let relativePath = entry.audioRelativePath else { return nil }
         let url = DictationAudioArchive.resolveURL(
             relativePath: relativePath,
-            dictationsFolder: entry.url.deletingLastPathComponent()
+            dictationsFolder: entry.url.deletingLastPathComponent(),
+            recoveryDirectory: DictationStoppedAudioRecoveryStore.defaultDirectory
         )
         if url == nil, let key = Self.key(for: entry) {
             infos[key] = Info(isAvailable: false, duration: nil)

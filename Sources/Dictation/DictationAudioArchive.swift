@@ -14,6 +14,11 @@ import Foundation
 /// a regular file directly inside the audio folder and named the way we name it.
 enum DictationAudioArchive {
     static let folderName = "audio"
+    // One mutation owner for pending/archive publication, deletion and pruning.
+    // Recursive because these operations call each other's synchronous helpers.
+    private static let mutationLock = NSRecursiveLock()
+    static func lockStorageMutation() { mutationLock.lock() }
+    static func unlockStorageMutation() { mutationLock.unlock() }
 
     /// `<dictations>/audio/`
     static func audioFolder(in dictationsFolder: URL) -> URL {
@@ -51,25 +56,44 @@ enum DictationAudioArchive {
         dictationsFolder: URL? = nil,
         fileManager: FileManager = .default
     ) -> URL? {
+        lockStorageMutation()
+        defer { unlockStorageMutation() }
         let folder = dictationsFolder ?? DictationStoragePaths.transcriptsFolder
         guard let stem = takeStem(fromRelativePath: relativePath) else { return nil }
         let audioFolder = audioFolder(in: folder)
         let destination = audioFolder.appendingPathComponent("\(stem).wav", isDirectory: false)
+        let staged = audioFolder.appendingPathComponent(".\(stem).keep-\(UUID().uuidString.lowercased()).wav")
+        defer { try? fileManager.removeItem(at: staged) }
         do {
+            if fileManager.fileExists(atPath: audioFolder.path), !isPlainDirectory(audioFolder, fileManager: fileManager) { return nil }
             try fileManager.createPrivateDirectory(at: audioFolder)
             guard isPlainDirectory(audioFolder, fileManager: fileManager) else { return nil }
             if fileManager.fileExists(atPath: destination.path) {
-                try fileManager.removeItem(at: destination)
+                // A restarted retry may see a completed copy, but its name is
+                // not proof. Never replace a different file or a symlink.
+                guard isRegularFile(destination, fileManager: fileManager),
+                      fileManager.contentsEqual(atPath: recovery.url.path, andPath: destination.path) else { return nil }
+                try DictationStoppedAudioRecoveryStore.synchronizeFileAndDirectory(destination)
+                try fileManager.removeItem(at: recovery.url)
+                DictationStoppedAudioRecoveryStore.removeMetadata(forAudioURL: recovery.url, fileManager: fileManager)
+                return destination
             }
-            do {
-                try fileManager.moveItem(at: recovery.url, to: destination)
-            } catch {
-                // Another volume (a relocated library on an external disk):
-                // copy, then drop the original only once the copy is in place.
-                try fileManager.copyItem(at: recovery.url, to: destination)
-                try? fileManager.removeItem(at: recovery.url)
+            // Stage a copy even on the same volume. A rename alone would
+            // retire the checkpoint before the destination's durability fence.
+            try fileManager.copyItem(at: recovery.url, to: staged)
+            fileManager.restrictFileToOwnerOnly(at: staged)
+            try DictationStoppedAudioRecoveryStore.synchronizeFileAndDirectory(staged)
+            guard fileManager.contentsEqual(atPath: recovery.url.path, andPath: staged.path) else { return nil }
+            try fileManager.moveItem(at: staged, to: destination)
+            // A nested injected operation may deliberately discard the take
+            // while publishing. Never leave our staged copy resurrected.
+            guard isRegularFile(recovery.url, fileManager: fileManager) else {
+                try? fileManager.removeItem(at: destination)
+                return nil
             }
             fileManager.restrictFileToOwnerOnly(at: destination)
+            try DictationStoppedAudioRecoveryStore.synchronizeFileAndDirectory(destination)
+            try fileManager.removeItem(at: recovery.url)
         } catch {
             return nil
         }
@@ -109,22 +133,30 @@ enum DictationAudioArchive {
         )
         do {
             try await convert(wavURL, temp)
-            guard isRegularFile(temp, fileManager: fileManager),
-                  fileSize(temp) > 0,
-                  isUsable(temp, wavURL) else {
-                try? fileManager.removeItem(at: temp)
-                return false
-            }
-            if fileManager.fileExists(atPath: destination.path) {
-                try fileManager.removeItem(at: destination)
-            }
-            try fileManager.moveItem(at: temp, to: destination)
-            fileManager.restrictFileToOwnerOnly(at: destination)
+            return try publishCompression(temp: temp, source: wavURL, destination: destination,
+                                          fileManager: fileManager, isUsable: isUsable)
         } catch {
             try? fileManager.removeItem(at: temp)
             return false
         }
-        try? fileManager.removeItem(at: wavURL)
+    }
+
+    private static func publishCompression(
+        temp: URL, source: URL, destination: URL, fileManager: FileManager,
+        isUsable: (URL, URL) -> Bool
+    ) throws -> Bool {
+        lockStorageMutation()
+        defer { unlockStorageMutation(); try? fileManager.removeItem(at: temp) }
+        // Conversion can await while Off or Delete runs. Missing source means
+        // its owner deliberately retired it; never publish the converted copy.
+        guard isRegularFile(source, fileManager: fileManager),
+              isRegularFile(temp, fileManager: fileManager), fileSize(temp) > 0,
+              isUsable(temp, source) else { return false }
+        if fileManager.fileExists(atPath: destination.path) { try fileManager.removeItem(at: destination) }
+        try fileManager.moveItem(at: temp, to: destination)
+        fileManager.restrictFileToOwnerOnly(at: destination)
+        try DictationStoppedAudioRecoveryStore.synchronizeFileAndDirectory(destination)
+        try? fileManager.removeItem(at: source)
         return true
     }
 
@@ -160,19 +192,23 @@ enum DictationAudioArchive {
     static func resolveURL(
         relativePath: String,
         dictationsFolder: URL? = nil,
+        recoveryDirectory: URL? = nil,
         fileManager: FileManager = .default
     ) -> URL? {
         let folder = dictationsFolder ?? DictationStoragePaths.transcriptsFolder
         guard let stem = takeStem(fromRelativePath: relativePath) else { return nil }
         let audioFolder = audioFolder(in: folder)
-        guard isPlainDirectory(audioFolder, fileManager: fileManager) else { return nil }
-        for ext in ["m4a", "wav"] {
+        for ext in ["m4a", "wav"] where isPlainDirectory(audioFolder, fileManager: fileManager) {
             let candidate = audioFolder.appendingPathComponent("\(stem).\(ext)", isDirectory: false)
             if isRegularFile(candidate, fileManager: fileManager) {
                 return candidate
             }
         }
-        return nil
+        guard let recoveryDirectory else { return nil }
+        return DictationStoppedAudioRecoveryStore.pendingAudioURL(
+            relativePath: relativePath, dictationsFolder: folder,
+            directory: recoveryDirectory, fileManager: fileManager
+        )
     }
 
     // MARK: - Delete
@@ -184,12 +220,22 @@ enum DictationAudioArchive {
     static func deleteKeptAudio(
         relativePath: String,
         dictationsFolder: URL,
+        recoveryDirectory: URL? = nil,
         fileManager: FileManager = .default
     ) -> Int {
+        lockStorageMutation()
+        defer { unlockStorageMutation() }
         guard let stem = takeStem(fromRelativePath: relativePath) else { return 0 }
         let audioFolder = audioFolder(in: dictationsFolder)
-        guard isPlainDirectory(audioFolder, fileManager: fileManager) else { return 0 }
-        var removed = 0
+        // A pending archive belongs to this entry too. Erase it before a
+        // later launch can retry and resurrect a deliberately deleted take.
+        var removed = recoveryDirectory.map {
+            DictationStoppedAudioRecoveryStore.deletePendingAudio(
+                relativePath: relativePath, dictationsFolder: dictationsFolder,
+                directory: $0, fileManager: fileManager
+            ) ? 1 : 0
+        } ?? 0
+        guard isPlainDirectory(audioFolder, fileManager: fileManager) else { return removed }
         for ext in ["m4a", "wav"] {
             let url = audioFolder.appendingPathComponent("\(stem).\(ext)", isDirectory: false)
             if isRegularFile(url, fileManager: fileManager), (try? fileManager.removeItem(at: url)) != nil {
@@ -202,11 +248,18 @@ enum DictationAudioArchive {
     /// Deletes a deleted dictation entry's kept audio, if it had any. The
     /// audio sits next to the entry's day file, in `audio/`.
     @discardableResult
-    static func deleteKeptAudio(for entry: SavedDictationEntry, fileManager: FileManager = .default) -> Int {
+    static func deleteKeptAudio(
+        for entry: SavedDictationEntry,
+        recoveryDirectory: URL = DictationStoppedAudioRecoveryStore.defaultDirectory,
+        fileManager: FileManager = .default
+    ) -> Int {
+        lockStorageMutation()
+        defer { unlockStorageMutation() }
         guard let audioRelativePath = entry.audioRelativePath else { return 0 }
         return deleteKeptAudio(
             relativePath: audioRelativePath,
             dictationsFolder: entry.url.deletingLastPathComponent(),
+            recoveryDirectory: recoveryDirectory,
             fileManager: fileManager
         )
     }
@@ -224,13 +277,26 @@ enum DictationAudioArchive {
         dictationsFolder: URL? = nil,
         fileManager: FileManager = .default
     ) -> Int {
-        guard let days = window.days else { return 0 }
+        lockStorageMutation()
+        defer { unlockStorageMutation() }
+        // This front door already runs at launch and after a retention change.
+        // Custom-library fixtures do not read the real recovery directory.
+        let window = dictationsFolder == nil ? AudioStoragePreferences.dictationAudioKeepWindow() : window
+        var pendingRemoved = 0
+        if dictationsFolder == nil {
+            DictationStoppedAudioRecoveryStore.retryPendingAudioRetention(
+                window: window, currentKeepWindow: { AudioStoragePreferences.dictationAudioKeepWindow() },
+                now: now, fileManager: fileManager,
+                onDiscard: { _ in pendingRemoved += 1 }
+            )
+        }
+        guard let days = window.days else { return pendingRemoved }
         let folder = dictationsFolder ?? DictationStoragePaths.transcriptsFolder
         let audioFolder = audioFolder(in: folder)
         guard isPlainDirectory(audioFolder, fileManager: fileManager),
-              let names = try? fileManager.contentsOfDirectory(atPath: audioFolder.path) else { return 0 }
+              let names = try? fileManager.contentsOfDirectory(atPath: audioFolder.path) else { return pendingRemoved }
         let cutoff = now.addingTimeInterval(-TimeInterval(days) * 86_400)
-        var removed = 0
+        var removed = pendingRemoved
         for name in names where isOurFileName(name) {
             let url = audioFolder.appendingPathComponent(name, isDirectory: false)
             guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
