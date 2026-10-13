@@ -628,11 +628,16 @@ final class MicActivityMonitor: @unchecked Sendable {
     }
 
     private static func currentCallActivitySnapshot(ownBundleID: String) -> MeetingCallActivitySnapshot {
+        // Stamped before the reads: the snapshot describes the audio system at
+        // the instant the scan starts. Stamping after the reads would let a slow
+        // scan claim it observed a state that only existed after the call-end
+        // deadline it has to prove.
+        let sampledAt = ProcessInfo.processInfo.systemUptime
         var snapshot = MeetingCallActivitySnapshot.read(objects: processObjectIDsIfAvailable(), ownBundleID: ownBundleID,
             bundleID: rawBundleIDProperty,
             input: { runningProperty($0, selector: kAudioProcessPropertyIsRunningInput) },
             output: { runningProperty($0, selector: kAudioProcessPropertyIsRunningOutput) })
-        snapshot.sampledAt = ProcessInfo.processInfo.systemUptime
+        snapshot.sampledAt = sampledAt
         return snapshot
     }
 

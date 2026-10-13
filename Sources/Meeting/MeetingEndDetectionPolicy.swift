@@ -90,6 +90,11 @@ struct MeetingEndDetectionPolicy {
     let countdownInterval: TimeInterval
     let maximumSampleGap: TimeInterval
     private var lastSampleAt: TimeInterval?
+    /// When the newest reliable inactive read was actually sampled, which can
+    /// be seconds before the moment it was delivered. Only a read sampled at or
+    /// after the deadline proves the call was still gone when the countdown
+    /// expired; anything older could predate a rejoin.
+    private var lastInactiveSampleAt: TimeInterval?
     private var inactiveSince: TimeInterval?
     private var deadline: TimeInterval?
     private var suppressed = false
@@ -101,7 +106,11 @@ struct MeetingEndDetectionPolicy {
         self.maximumSampleGap = maximumSampleGap
     }
 
-    mutating func observe(_ activity: Activity, at now: TimeInterval) -> Event {
+    /// `sampledAt` is when the sensor actually read the system; `now` is when
+    /// that read arrived. They differ enough to matter: the poll that closes the
+    /// race is sampled at or after the deadline, and a read delivered after the
+    /// deadline but sampled before it must not stand in for one.
+    mutating func observe(_ activity: Activity, sampledAt: TimeInterval, at now: TimeInterval) -> Event {
         guard !suppressed else { return .none }
         let gap = lastSampleAt.map { now - $0 }
         lastSampleAt = now
@@ -109,13 +118,17 @@ struct MeetingEndDetectionPolicy {
             let event = clearWarning()
             // A new sample starts a fresh interval after a suspended monitor.
             inactiveSince = activity == .inactive ? now : nil
+            if activity == .inactive { lastInactiveSampleAt = sampledAt }
             return event
         }
         switch activity {
         case .active, .unknown:
             return clearWarning()
         case .inactive:
-            if let deadline { return now >= deadline ? .stop : .none }
+            lastInactiveSampleAt = sampledAt
+            if let deadline {
+                return now >= deadline && sampledAt >= deadline ? .stop : .none
+            }
             guard let inactiveSince else {
                 self.inactiveSince = now
                 return .none
@@ -126,10 +139,14 @@ struct MeetingEndDetectionPolicy {
         }
     }
 
-    /// The UI countdown cannot stop a call on stale evidence between scans.
+    /// The UI countdown cannot stop a call on stale evidence between scans, and
+    /// the evidence it stops on has to have been sampled after the deadline:
+    /// the deadline can pass while the call is already rejoining, and the next
+    /// poll is what tells the two apart.
     func canStop(at now: TimeInterval) -> Bool {
-        guard !suppressed, let deadline, let lastSampleAt else { return false }
+        guard !suppressed, let deadline, let lastSampleAt, let lastInactiveSampleAt else { return false }
         return now >= deadline && now >= lastSampleAt && now - lastSampleAt <= maximumSampleGap
+            && lastInactiveSampleAt >= deadline
     }
 
     mutating func keepRecording() {
@@ -141,6 +158,7 @@ struct MeetingEndDetectionPolicy {
         let hadWarning = deadline != nil
         deadline = nil
         inactiveSince = nil
+        lastInactiveSampleAt = nil
         return hadWarning ? .warningCleared : .none
     }
 }

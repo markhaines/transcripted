@@ -124,8 +124,8 @@ func testMeetingEndDetectionPolicy() {
         let safari = MeetingCallActivitySnapshot(inputUsers: ["com.apple.WebKit.GPU"], outputUsers: [], isReliable: true)
         let safariActivity = safari.activity(in: tracking.families, cameraInUse: false)
         assertTrue(safariActivity == .inactive, "a different browser's call does not sustain the recorded Chrome meeting")
-        _ = tracking.policy.observe(safariActivity, at: 100)
-        assertEqual(tracking.policy.observe(safariActivity, at: 110), .warningStarted,
+        _ = tracking.policy.observe(safariActivity, sampledAt: 100, at: 100)
+        assertEqual(tracking.policy.observe(safariActivity, sampledAt: 110, at: 110), .warningStarted,
                     "the bound browser ending still warns when another browser is active")
         assertEqual(tracking.families, chrome, "later snapshots do not retarget the recording")
     }
@@ -134,9 +134,12 @@ func testMeetingEndDetectionPolicy() {
         let identity = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
         let other = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
         var tracking = MeetingCallEndTracking(recordingIdentity: identity, families: zoom)
-        for time in [100.0, 110, 120, 130] { _ = tracking.policy.observe(.inactive, at: time) }
+        for time in [100.0, 110, 120, 130] { _ = tracking.policy.observe(.inactive, sampledAt: time, at: time) }
+        assertFalse(tracking.canStop(currentIdentity: identity, warningIdentity: identity, activity: .inactive, at: 140),
+                    "a reading sampled before the deadline cannot authorize the expired warning")
+        _ = tracking.policy.observe(.inactive, sampledAt: 140, at: 140)
         assertTrue(tracking.canStop(currentIdentity: identity, warningIdentity: identity, activity: .inactive, at: 140),
-                   "matching identities and fresh inactivity authorize the expired warning")
+                   "matching identities and post-deadline inactivity authorize the expired warning")
         for current in [nil, other, identity] as [UUID?] {
             for warning in [nil, other, identity] as [UUID?] where current != identity || warning != identity {
                 assertFalse(tracking.canStop(currentIdentity: current, warningIdentity: warning, activity: .inactive, at: 140),
@@ -145,18 +148,20 @@ func testMeetingEndDetectionPolicy() {
         }
         assertFalse(tracking.canStop(currentIdentity: identity, warningIdentity: identity, activity: .inactive, at: 139),
                     "matching identities still require the deadline")
-        assertFalse(tracking.canStop(currentIdentity: identity, warningIdentity: identity, activity: .inactive, at: 143),
+        assertFalse(tracking.canStop(currentIdentity: identity, warningIdentity: identity, activity: .inactive, at: 153),
                     "matching identities still require fresh evidence")
     }
 
     runSuite("Meeting end detection tracking — active or unknown current evidence vetoes an expired warning") {
         let identity = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
         var tracking = MeetingCallEndTracking(recordingIdentity: identity, families: zoom)
-        for time in [100.0, 110, 120, 130] { _ = tracking.policy.observe(.inactive, at: time) }
+        for time in [100.0, 110, 120, 130, 140] { _ = tracking.policy.observe(.inactive, sampledAt: time, at: time) }
         for activity in [MeetingEndDetectionPolicy.Activity.active, .unknown] {
             assertFalse(tracking.canStop(currentIdentity: identity, warningIdentity: identity, activity: activity, at: 140),
                         "current activity or a failed read vetoes timeout even before the next policy update")
         }
+        assertTrue(tracking.canStop(currentIdentity: identity, warningIdentity: identity, activity: .inactive, at: 140),
+                   "the same post-deadline evidence does stop while the call stays inactive")
     }
 
     struct ProcessProbe {
@@ -308,140 +313,180 @@ func testMeetingEndDetectionPolicy() {
 
     runSuite("Meeting end detection — ten uninterrupted inactive seconds open a warning") {
         var policy = MeetingEndDetectionPolicy()
-        assertEqual(policy.observe(.inactive, at: 100), .none, "the first absent sample starts observation")
-        assertEqual(policy.observe(.inactive, at: 109.9), .none, "brief inactivity must not show the warning")
-        assertEqual(policy.observe(.inactive, at: 110), .warningStarted, "the warning opens at ten seconds")
-        assertEqual(policy.observe(.inactive, at: 111), .none, "the same warning must not open twice")
+        assertEqual(policy.observe(.inactive, sampledAt: 100, at: 100), .none, "the first absent sample starts observation")
+        assertEqual(policy.observe(.inactive, sampledAt: 109.9, at: 109.9), .none, "brief inactivity must not show the warning")
+        assertEqual(policy.observe(.inactive, sampledAt: 110, at: 110), .warningStarted, "the warning opens at ten seconds")
+        assertEqual(policy.observe(.inactive, sampledAt: 111, at: 111), .none, "the same warning must not open twice")
         assertFalse(policy.canStop(at: 111), "showing the warning does not stop the recording")
     }
 
     runSuite("Meeting end detection — thirty seconds of warning give the user time before stopping") {
         var policy = MeetingEndDetectionPolicy()
-        _ = policy.observe(.inactive, at: 100)
-        assertEqual(policy.observe(.inactive, at: 110), .warningStarted, "the warning begins after confirmed inactivity")
+        _ = policy.observe(.inactive, sampledAt: 100, at: 100)
+        assertEqual(policy.observe(.inactive, sampledAt: 110, at: 110), .warningStarted, "the warning begins after confirmed inactivity")
         for time in [120.0, 130.0, 139.9] {
-            assertEqual(policy.observe(.inactive, at: time), .none, "the grace period remains open")
+            assertEqual(policy.observe(.inactive, sampledAt: time, at: time), .none, "the grace period remains open")
             assertFalse(policy.canStop(at: time), "a UI tick before the deadline cannot stop")
         }
-        assertEqual(policy.observe(.inactive, at: 140), .stop, "an untouched warning stops at its deadline")
+        assertEqual(policy.observe(.inactive, sampledAt: 140, at: 140), .stop, "an untouched warning stops at its deadline")
         assertTrue(policy.canStop(at: 140), "the UI deadline agrees with current inactivity evidence")
     }
 
     runSuite("Meeting end detection — the full countdown starts when the warning is actually shown") {
         var policy = MeetingEndDetectionPolicy()
-        _ = policy.observe(.inactive, at: 100)
-        _ = policy.observe(.inactive, at: 109)
-        assertEqual(policy.observe(.inactive, at: 112), .warningStarted, "the first eligible poll opens the warning")
-        _ = policy.observe(.inactive, at: 122)
-        _ = policy.observe(.inactive, at: 132)
-        assertEqual(policy.observe(.inactive, at: 140), .none, "a late warning still allows a full thirty seconds")
+        _ = policy.observe(.inactive, sampledAt: 100, at: 100)
+        _ = policy.observe(.inactive, sampledAt: 109, at: 109)
+        assertEqual(policy.observe(.inactive, sampledAt: 112, at: 112), .warningStarted, "the first eligible poll opens the warning")
+        _ = policy.observe(.inactive, sampledAt: 122, at: 122)
+        _ = policy.observe(.inactive, sampledAt: 132, at: 132)
+        assertEqual(policy.observe(.inactive, sampledAt: 140, at: 140), .none, "a late warning still allows a full thirty seconds")
         assertFalse(policy.canStop(at: 140), "the deadline is measured from presentation")
-        assertEqual(policy.observe(.inactive, at: 142), .stop, "the complete displayed grace period expires")
+        assertEqual(policy.observe(.inactive, sampledAt: 142, at: 142), .stop, "the complete displayed grace period expires")
     }
 
     runSuite("Meeting end detection — activity returning before the warning restarts the absence interval") {
         var policy = MeetingEndDetectionPolicy()
-        _ = policy.observe(.inactive, at: 100)
-        assertEqual(policy.observe(.active, at: 109), .none, "returning activity discards the interrupted interval")
-        assertEqual(policy.observe(.inactive, at: 110), .none, "new inactivity starts fresh")
-        assertEqual(policy.observe(.inactive, at: 119), .none, "old inactivity earns no credit")
-        assertEqual(policy.observe(.inactive, at: 120), .warningStarted, "a new full interval can warn")
+        _ = policy.observe(.inactive, sampledAt: 100, at: 100)
+        assertEqual(policy.observe(.active, sampledAt: 109, at: 109), .none, "returning activity discards the interrupted interval")
+        assertEqual(policy.observe(.inactive, sampledAt: 110, at: 110), .none, "new inactivity starts fresh")
+        assertEqual(policy.observe(.inactive, sampledAt: 119, at: 119), .none, "old inactivity earns no credit")
+        assertEqual(policy.observe(.inactive, sampledAt: 120, at: 120), .warningStarted, "a new full interval can warn")
     }
 
     runSuite("Meeting end detection — activity returning during the warning cancels automatic stopping") {
         var policy = MeetingEndDetectionPolicy()
-        _ = policy.observe(.inactive, at: 100)
-        _ = policy.observe(.inactive, at: 110)
-        _ = policy.observe(.inactive, at: 120)
-        _ = policy.observe(.inactive, at: 130)
-        assertEqual(policy.observe(.active, at: 140), .warningCleared, "activity wins even at the stop deadline")
+        _ = policy.observe(.inactive, sampledAt: 100, at: 100)
+        _ = policy.observe(.inactive, sampledAt: 110, at: 110)
+        _ = policy.observe(.inactive, sampledAt: 120, at: 120)
+        _ = policy.observe(.inactive, sampledAt: 130, at: 130)
+        assertEqual(policy.observe(.active, sampledAt: 140, at: 140), .warningCleared, "activity wins even at the stop deadline")
         assertFalse(policy.canStop(at: 140), "a dismissed warning cannot authorize a UI stop")
-        _ = policy.observe(.inactive, at: 141)
-        assertEqual(policy.observe(.inactive, at: 151), .warningStarted, "a later end gets a new warning")
+        _ = policy.observe(.inactive, sampledAt: 141, at: 141)
+        assertEqual(policy.observe(.inactive, sampledAt: 151, at: 151), .warningStarted, "a later end gets a new warning")
         assertFalse(policy.canStop(at: 151), "the new warning never inherits the old expired deadline")
     }
 
     runSuite("Meeting end detection — an unknown read cancels the warning and cannot stop the call") {
         var policy = MeetingEndDetectionPolicy()
-        _ = policy.observe(.inactive, at: 100)
-        _ = policy.observe(.inactive, at: 110)
-        _ = policy.observe(.inactive, at: 120)
-        _ = policy.observe(.inactive, at: 130)
-        assertEqual(policy.observe(.unknown, at: 140), .warningCleared, "a failed read at expiry cancels the warning")
+        _ = policy.observe(.inactive, sampledAt: 100, at: 100)
+        _ = policy.observe(.inactive, sampledAt: 110, at: 110)
+        _ = policy.observe(.inactive, sampledAt: 120, at: 120)
+        _ = policy.observe(.inactive, sampledAt: 130, at: 130)
+        assertEqual(policy.observe(.unknown, sampledAt: 140, at: 140), .warningCleared, "a failed read at expiry cancels the warning")
         assertFalse(policy.canStop(at: 140), "unknown evidence cannot authorize stopping")
-        _ = policy.observe(.inactive, at: 141)
-        assertEqual(policy.observe(.inactive, at: 150), .none, "recovery needs a new uninterrupted interval")
-        assertEqual(policy.observe(.inactive, at: 151), .warningStarted, "reliable recovered evidence can warn again")
+        _ = policy.observe(.inactive, sampledAt: 141, at: 141)
+        assertEqual(policy.observe(.inactive, sampledAt: 150, at: 150), .none, "recovery needs a new uninterrupted interval")
+        assertEqual(policy.observe(.inactive, sampledAt: 151, at: 151), .warningStarted, "reliable recovered evidence can warn again")
     }
 
     runSuite("Meeting end detection — an unknown read also resets inactivity before a warning") {
         var policy = MeetingEndDetectionPolicy()
-        _ = policy.observe(.inactive, at: 100)
-        assertEqual(policy.observe(.unknown, at: 109), .none, "unknown does not show a warning")
-        _ = policy.observe(.inactive, at: 110)
-        assertEqual(policy.observe(.inactive, at: 119), .none, "absence before the failure is discarded")
-        assertEqual(policy.observe(.inactive, at: 120), .warningStarted, "only recovered reliable absence counts")
+        _ = policy.observe(.inactive, sampledAt: 100, at: 100)
+        assertEqual(policy.observe(.unknown, sampledAt: 109, at: 109), .none, "unknown does not show a warning")
+        _ = policy.observe(.inactive, sampledAt: 110, at: 110)
+        assertEqual(policy.observe(.inactive, sampledAt: 119, at: 119), .none, "absence before the failure is discarded")
+        assertEqual(policy.observe(.inactive, sampledAt: 120, at: 120), .warningStarted, "only recovered reliable absence counts")
     }
 
     runSuite("Meeting end detection — Keep recording suppresses further end prompts for this recording") {
         var policy = MeetingEndDetectionPolicy()
-        _ = policy.observe(.inactive, at: 100)
-        _ = policy.observe(.inactive, at: 110)
+        _ = policy.observe(.inactive, sampledAt: 100, at: 100)
+        _ = policy.observe(.inactive, sampledAt: 110, at: 110)
         policy.keepRecording()
         for time in stride(from: 120.0, through: 200.0, by: 10.0) {
-            assertEqual(policy.observe(.inactive, at: time), .none, "keeping the recording suppresses future warnings and stops")
+            assertEqual(policy.observe(.inactive, sampledAt: time, at: time), .none, "keeping the recording suppresses future warnings and stops")
             assertFalse(policy.canStop(at: time), "an old UI countdown must not override the user's choice")
         }
-        _ = policy.observe(.active, at: 201)
-        _ = policy.observe(.inactive, at: 202)
-        assertEqual(policy.observe(.inactive, at: 212), .none, "new activity does not revoke Keep recording")
+        _ = policy.observe(.active, sampledAt: 201, at: 201)
+        _ = policy.observe(.inactive, sampledAt: 202, at: 202)
+        assertEqual(policy.observe(.inactive, sampledAt: 212, at: 212), .none, "new activity does not revoke Keep recording")
         var nextRecording = MeetingEndDetectionPolicy()
-        _ = nextRecording.observe(.inactive, at: 300)
-        assertEqual(nextRecording.observe(.inactive, at: 310), .warningStarted, "suppression belongs only to the current recording")
+        _ = nextRecording.observe(.inactive, sampledAt: 300, at: 300)
+        assertEqual(nextRecording.observe(.inactive, sampledAt: 310, at: 310), .warningStarted, "suppression belongs only to the current recording")
     }
 
     runSuite("Meeting end detection — missed polls reset inactivity and clear an outstanding warning") {
         var policy = MeetingEndDetectionPolicy()
-        _ = policy.observe(.inactive, at: 100)
-        assertEqual(policy.observe(.inactive, at: 112.1), .none, "more than twelve seconds unobserved cannot establish absence")
-        assertEqual(policy.observe(.inactive, at: 122.1), .warningStarted, "fresh uninterrupted absence can warn")
-        assertEqual(policy.observe(.inactive, at: 135), .warningCleared, "a missed poll invalidates the countdown evidence")
+        _ = policy.observe(.inactive, sampledAt: 100, at: 100)
+        assertEqual(policy.observe(.inactive, sampledAt: 112.1, at: 112.1), .none, "more than twelve seconds unobserved cannot establish absence")
+        assertEqual(policy.observe(.inactive, sampledAt: 122.1, at: 122.1), .warningStarted, "fresh uninterrupted absence can warn")
+        assertEqual(policy.observe(.inactive, sampledAt: 135, at: 135), .warningCleared, "a missed poll invalidates the countdown evidence")
         assertFalse(policy.canStop(at: 153), "an expired old warning cannot survive a monitoring gap")
-        assertEqual(policy.observe(.inactive, at: 145), .warningStarted, "a full fresh interval follows the monitoring gap")
+        assertEqual(policy.observe(.inactive, sampledAt: 145, at: 145), .warningStarted, "a full fresh interval follows the monitoring gap")
     }
 
     runSuite("Meeting end detection — a poll exactly twelve seconds later is still continuous") {
         var policy = MeetingEndDetectionPolicy()
-        _ = policy.observe(.inactive, at: 100)
-        assertEqual(policy.observe(.inactive, at: 112), .warningStarted, "the maximum permitted sample gap is inclusive")
-        _ = policy.observe(.inactive, at: 124)
-        _ = policy.observe(.inactive, at: 136)
-        assertEqual(policy.observe(.inactive, at: 142), .stop, "permitted poll gaps preserve the countdown")
+        _ = policy.observe(.inactive, sampledAt: 100, at: 100)
+        assertEqual(policy.observe(.inactive, sampledAt: 112, at: 112), .warningStarted, "the maximum permitted sample gap is inclusive")
+        _ = policy.observe(.inactive, sampledAt: 124, at: 124)
+        _ = policy.observe(.inactive, sampledAt: 136, at: 136)
+        assertEqual(policy.observe(.inactive, sampledAt: 142, at: 142), .stop, "permitted poll gaps preserve the countdown")
     }
 
     runSuite("Meeting end detection — time moving backwards invalidates absence and warning evidence") {
         var policy = MeetingEndDetectionPolicy()
-        _ = policy.observe(.inactive, at: 100)
-        _ = policy.observe(.inactive, at: 109)
-        assertEqual(policy.observe(.inactive, at: 108), .none, "backwards time starts a fresh absence interval")
-        assertEqual(policy.observe(.inactive, at: 117), .none, "earlier absence cannot count after time moves backwards")
-        assertEqual(policy.observe(.inactive, at: 118), .warningStarted, "a fresh ten seconds can warn")
-        assertEqual(policy.observe(.inactive, at: 117), .warningCleared, "backwards time also clears an existing warning")
+        _ = policy.observe(.inactive, sampledAt: 100, at: 100)
+        _ = policy.observe(.inactive, sampledAt: 109, at: 109)
+        assertEqual(policy.observe(.inactive, sampledAt: 108, at: 108), .none, "backwards time starts a fresh absence interval")
+        assertEqual(policy.observe(.inactive, sampledAt: 117, at: 117), .none, "earlier absence cannot count after time moves backwards")
+        assertEqual(policy.observe(.inactive, sampledAt: 118, at: 118), .warningStarted, "a fresh ten seconds can warn")
+        assertEqual(policy.observe(.inactive, sampledAt: 117, at: 117), .warningCleared, "backwards time also clears an existing warning")
         assertFalse(policy.canStop(at: 148), "the old deadline has been invalidated")
     }
 
-    runSuite("Meeting end detection — a UI expiry needs both the deadline and a fresh observation") {
+    runSuite("Meeting end detection — a UI expiry needs a reading sampled at or after the deadline") {
         var policy = MeetingEndDetectionPolicy()
         assertFalse(policy.canStop(at: 100), "a new recording has no stop authorization")
-        _ = policy.observe(.inactive, at: 100)
-        _ = policy.observe(.inactive, at: 110)
-        _ = policy.observe(.inactive, at: 120)
-        _ = policy.observe(.inactive, at: 130)
-        assertFalse(policy.canStop(at: 139.9), "fresh evidence before the deadline is insufficient")
-        assertTrue(policy.canStop(at: 140), "fresh evidence at the deadline authorizes the UI stop")
-        assertTrue(policy.canStop(at: 142), "evidence remains fresh through the permitted gap")
-        assertFalse(policy.canStop(at: 142.1), "stale evidence cannot authorize stopping between scans")
-        assertEqual(policy.observe(.inactive, at: 150), .warningCleared, "the next delayed poll discards the expired warning")
-        assertFalse(policy.canStop(at: 150), "a delayed poll must not retrospectively confirm the old deadline")
+        _ = policy.observe(.inactive, sampledAt: 100, at: 100)
+        _ = policy.observe(.inactive, sampledAt: 110, at: 110)
+        _ = policy.observe(.inactive, sampledAt: 120, at: 120)
+        _ = policy.observe(.inactive, sampledAt: 130, at: 130)
+        _ = policy.observe(.inactive, sampledAt: 135, at: 135)
+        assertFalse(policy.canStop(at: 139.9), "any evidence before the deadline is insufficient")
+        assertFalse(policy.canStop(at: 140), "a sample at 135s cannot prove the call was still gone at the 140s deadline")
+        assertFalse(policy.canStop(at: 142), "waiting does not turn older evidence into post-deadline evidence")
+        assertEqual(policy.observe(.inactive, sampledAt: 141, at: 141), .stop,
+                    "the first reading sampled after the deadline stops the recording")
+        assertTrue(policy.canStop(at: 141), "the confirmed stop is authorized")
+        assertFalse(policy.canStop(at: 154), "even a confirmed stop still needs fresh polling")
+    }
+
+    runSuite("Meeting end detection — a rejoin after the deadline cancels the call-ended warning") {
+        var policy = MeetingEndDetectionPolicy()
+        _ = policy.observe(.inactive, sampledAt: 100, at: 100)
+        _ = policy.observe(.inactive, sampledAt: 110, at: 110)
+        _ = policy.observe(.inactive, sampledAt: 120, at: 120)
+        _ = policy.observe(.inactive, sampledAt: 130, at: 130)
+        _ = policy.observe(.inactive, sampledAt: 135, at: 135)
+        assertFalse(policy.canStop(at: 140), "an inactive sample at 135s and a 140s deadline cannot authorize a stop")
+        assertEqual(policy.observe(.active, sampledAt: 141, at: 141), .warningCleared,
+                    "an active sample at 141s means the call had already rejoined")
+        assertFalse(policy.canStop(at: 141), "a cancelled warning cannot stop the recording")
+    }
+
+    runSuite("Meeting end detection — post-deadline inactivity is what permits the stop") {
+        var policy = MeetingEndDetectionPolicy()
+        _ = policy.observe(.inactive, sampledAt: 100, at: 100)
+        _ = policy.observe(.inactive, sampledAt: 110, at: 110)
+        _ = policy.observe(.inactive, sampledAt: 120, at: 120)
+        _ = policy.observe(.inactive, sampledAt: 130, at: 130)
+        _ = policy.observe(.inactive, sampledAt: 135, at: 135)
+        assertFalse(policy.canStop(at: 140), "the deadline alone is not proof the call was still gone")
+        assertEqual(policy.observe(.inactive, sampledAt: 141, at: 141), .stop,
+                    "an inactive sample at 141s permits stopping")
+    }
+
+    runSuite("Meeting end detection — a pre-deadline reading delivered after the deadline proves nothing") {
+        var policy = MeetingEndDetectionPolicy()
+        _ = policy.observe(.inactive, sampledAt: 100, at: 100)
+        _ = policy.observe(.inactive, sampledAt: 110, at: 110)
+        _ = policy.observe(.inactive, sampledAt: 120, at: 120)
+        _ = policy.observe(.inactive, sampledAt: 131, at: 131)
+        assertEqual(policy.observe(.inactive, sampledAt: 139, at: 141), .none,
+                    "a reading sampled at 139s but delivered at 141s cannot confirm the 140s deadline")
+        assertFalse(policy.canStop(at: 141), "delivery time must not stand in for sampling time")
+        assertEqual(policy.observe(.inactive, sampledAt: 146, at: 146), .stop,
+                    "the next reading actually sampled after the deadline stops the recording")
     }
 }

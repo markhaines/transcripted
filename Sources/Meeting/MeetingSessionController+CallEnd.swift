@@ -15,16 +15,30 @@ extension MeetingSessionController {
     func observeCallActivity(_ snapshot: MeetingCallActivitySnapshot) {
         let now = ProcessInfo.processInfo.systemUptime
         latestCallActivity = snapshot
-        let sampledAt = snapshot.sampledAt ?? now
-        latestCallActivityAt = sampledAt
+        latestCallActivityAt = snapshot.sampledAt
         guard isRecording, var tracking = callEndTracking,
               tracking.recordingIdentity == activeRecordingIdentity else { return }
-        let activity = now - sampledAt > 12 || sampledAt > now ? .unknown
-            : snapshot.activity(in: tracking.families, cameraInUse: freshCallCameraActivity(at: now))
-        let event = tracking.policy.observe(activity, at: now)
+        // The snapshot carries when the audio system was actually read, which can
+        // be seconds before this delivery. A read with no usable sampling time,
+        // or one that is stale or from the future, is unknown: it must never look
+        // like a released stream or hold up a countdown.
+        let sampledAt = snapshot.sampledAt
+        let activity: MeetingEndDetectionPolicy.Activity
+        if let sampledAt, sampledAt <= now, now - sampledAt <= 12 {
+            activity = snapshot.activity(in: tracking.families, cameraInUse: freshCallCameraActivity(at: now))
+        } else {
+            activity = .unknown
+        }
+        let event = tracking.policy.observe(activity, sampledAt: sampledAt ?? now, at: now)
         callEndTracking = tracking
+        applyCallEndEvent(event, tracking: tracking)
+    }
+
+    private func applyCallEndEvent(_ event: MeetingEndDetectionPolicy.Event,
+                                   tracking: MeetingCallEndTracking) {
         switch event {
-        case .none: break
+        case .none:
+            break
         case .warningStarted:
             audioInactivityWarning = MeetingAudioInactivityWarning(inactiveDuration: 10,
                 countdownSeconds: 30, kind: .callEnded, recordingIdentity: tracking.recordingIdentity)
@@ -45,7 +59,8 @@ extension MeetingSessionController {
         if inUse != false, var tracking = callEndTracking {
             // A camera is not attributable to an app. Treat it conservatively
             // as a veto, never as proof that a particular call ended.
-            _ = tracking.policy.observe(inUse == true ? .active : .unknown, at: ProcessInfo.processInfo.systemUptime)
+            _ = tracking.policy.observe(inUse == true ? .active : .unknown, sampledAt: sampledAt,
+                                        at: ProcessInfo.processInfo.systemUptime)
             callEndTracking = tracking
             clearCallEndWarning()
         }

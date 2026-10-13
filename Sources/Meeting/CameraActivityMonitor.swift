@@ -121,10 +121,12 @@ final class CameraActivityMonitor: @unchecked Sendable {
     }
 
     private func scanAndEmit() {
+        // Same convention as the mic monitor's snapshot: the timestamp describes
+        // the instant the scan began, not when a slow CMIO read finished.
+        let sampledAt = ProcessInfo.processInfo.systemUptime
         let readings = cameraDeviceIDsIfAvailable()?.map(isRunningSomewhereIfAvailable)
         let callActivity = MeetingCallActivitySnapshot.cameraInUse(readings: readings)
         let activityCallback = onCallCameraActivity
-        let sampledAt = ProcessInfo.processInfo.systemUptime
         DispatchQueue.main.async { activityCallback?(callActivity, sampledAt) }
         let inUse = Self.isCameraInUse(deviceRunningStates: (readings ?? []).map { $0 ?? false })
         let now = Date()
