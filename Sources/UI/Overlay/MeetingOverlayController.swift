@@ -807,9 +807,10 @@ final class MeetingOverlayController: NSObject {
                 await session.stopRecording(reason: .systemAudioWarning)
             }
         case .audioInactivity:
+            let warning = meetingSession?.audioInactivityWarning
             Task { @MainActor [weak self] in
                 guard let session = self?.meetingSession else { return }
-                await session.endRecordingFromAudioInactivityPrompt(automatic: false)
+                await session.endRecordingFromAudioInactivityPrompt(automatic: false, expectedWarning: warning)
             }
         case .audioRoute:
             Task { @MainActor [weak self] in
@@ -968,12 +969,10 @@ final class MeetingOverlayController: NSObject {
         case .audioRoute:
             return
         case .audioInactivity:
-            guard meetingSession?.audioInactivityWarning?.automaticStopAllowed != false else {
-                return
-            }
+            guard let warning = meetingSession?.audioInactivityWarning, warning.automaticStopAllowed else { return }
             Task { @MainActor [weak self] in
                 guard let session = self?.meetingSession else { return }
-                await session.endRecordingFromAudioInactivityPrompt(automatic: true)
+                await session.endRecordingFromAudioInactivityPrompt(automatic: true, expectedWarning: warning)
             }
         case .missedCall:
             onMissedCallNudgeResolved?(.expired)
@@ -1031,12 +1030,12 @@ final class MeetingOverlayController: NSObject {
         }
 
         return PromptDisplay(
-            title: "No sound",
-            detail: "Nothing heard for \(formatInactiveDuration(warning.inactiveDuration)).",
+            title: warning.kind == .callEnded ? "Meeting ended?" : "No sound",
+            detail: warning.kind == .callEnded ? "The call app is no longer using audio." : "Nothing heard for \(formatInactiveDuration(warning.inactiveDuration)).",
             countdownText: "Stops in \(max(0, countdownSeconds))s",
-            secondaryTitle: "Continue",
+            secondaryTitle: warning.kind == .callEnded ? "Keep recording" : "Continue",
             secondaryAccessibilityLabel: "Keep recording",
-            primaryTitle: "Stop",
+            primaryTitle: warning.kind == .callEnded ? "Stop now" : "Stop",
             primaryAccessibilityLabel: "Stop and transcribe the meeting"
         )
     }
