@@ -73,7 +73,7 @@ import Foundation
 final class MicActivityMonitor: @unchecked Sendable {
     /// Raw source activity for end detection, emitted on every scan. A failed
     /// read is unknown; the start detector's empty/false fallback cannot stop a call.
-    var onCallActivitySnapshot: ((MeetingCallActivitySnapshot) -> Void)?
+    var onCallActivitySnapshot: (@MainActor @Sendable (MeetingCallActivitySnapshot) -> Void)?
     /// Delivered on the main actor with the set of non-self bundle IDs currently
     /// holding the mic input. An empty set is the explicit "inactive" edge (the
     /// last mic user stopped). Assign before calling `start()` and do not mutate
@@ -332,8 +332,7 @@ final class MicActivityMonitor: @unchecked Sendable {
     }
 
     private func scanAndEmit() {
-        var snapshot = Self.currentCallActivitySnapshot(ownBundleID: ownBundleID)
-        snapshot.sampledAt = ProcessInfo.processInfo.systemUptime
+        let snapshot = Self.currentCallActivitySnapshot(ownBundleID: ownBundleID)
         let snapshotCallback = onCallActivitySnapshot
         DispatchQueue.main.async { snapshotCallback?(snapshot) }
         let processes = currentProcessAudioState()
@@ -629,10 +628,12 @@ final class MicActivityMonitor: @unchecked Sendable {
     }
 
     private static func currentCallActivitySnapshot(ownBundleID: String) -> MeetingCallActivitySnapshot {
-        MeetingCallActivitySnapshot.read(objects: processObjectIDsIfAvailable(), ownBundleID: ownBundleID,
+        var snapshot = MeetingCallActivitySnapshot.read(objects: processObjectIDsIfAvailable(), ownBundleID: ownBundleID,
             bundleID: rawBundleIDProperty,
             input: { runningProperty($0, selector: kAudioProcessPropertyIsRunningInput) },
             output: { runningProperty($0, selector: kAudioProcessPropertyIsRunningOutput) })
+        snapshot.sampledAt = ProcessInfo.processInfo.systemUptime
+        return snapshot
     }
 
     private static func runningProperty(_ object: AudioObjectID,

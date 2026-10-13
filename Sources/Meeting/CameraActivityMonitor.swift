@@ -41,7 +41,7 @@ final class CameraActivityMonitor: @unchecked Sendable {
     /// running continuously for `sustainInterval`, `false` on the inactive edge.
     /// Assign before calling `start()` and do not mutate while running.
     var onChange: ((Bool) -> Void)?
-    var onCallCameraActivity: ((Bool?, TimeInterval) -> Void)?
+    var onCallCameraActivity: (@MainActor @Sendable (Bool?, TimeInterval) -> Void)?
 
     private let queue = DispatchQueue(label: "CameraActivityMonitor.cmio-devices", qos: .utility)
     private let debounceInterval: TimeInterval
