@@ -252,8 +252,8 @@ final class GhostBrainServerHost: @unchecked Sendable {
                 "handshakeMilliseconds": String(Self.milliseconds(since: acceptedAt)),
             ])
             if case let .personalHistory(events) = request {
-                let accepted = await self.personalHistory.ingest(events)
-                _ = Self.write(accepted ? .recorded : .error, to: connection)
+                let response = await Self.personalHistoryResponse(events, ingest: self.personalHistory)
+                _ = Self.write(response, to: connection)
                 return
             }
             // Transcripted: a newer keyboard's events this app can't read.

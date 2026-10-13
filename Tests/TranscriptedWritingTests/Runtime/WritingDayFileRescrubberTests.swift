@@ -300,6 +300,7 @@ struct WritingDayFileRescrubberTests {
         let folder = sandbox.writing
         let recorder = WritingDayFileRecorder(
             directory: { folder },
+            pendingDirectory: { WritingDayFileStore.resolved(folder.deletingLastPathComponent()).appendingPathComponent("pending", isDirectory: true) },
             gate: { .init(enabled: true, historyIdentifier: "history", consentIdentifier: "consent") },
             appName: { _ in nil },
             timeZone: { Self.timeZone },

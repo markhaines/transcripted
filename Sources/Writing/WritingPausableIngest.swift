@@ -15,4 +15,9 @@ struct WritingPausableIngest: PersonalHistoryIngesting {
         guard !isPaused() else { return PersonalHistoryEvent.validBatch(events) }
         return await base.ingest(events)
     }
+
+    func recordingResponse(_ events: [PersonalHistoryEvent]) async -> GhostBrainResponse {
+        guard !isPaused() else { return PersonalHistoryEvent.validBatch(events) ? .recorded : .error }
+        return await base.recordingResponse(events)
+    }
 }

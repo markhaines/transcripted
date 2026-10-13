@@ -82,6 +82,18 @@ library moves:
 - diagnostics log: `~/Library/Application Support/Transcripted/logs/writing-diagnostics.log`,
   rolled to `writing-diagnostics.log.1` at 4 MB (one old generation kept)
 
+Closed, secret-scrubbed writing waiting for its day-file save is owned by
+`~/Library/Application Support/Transcripted/writing/Pending Entries/pending-writing.json`.
+This private 0600 journal in a 0700 folder stays local when the capture library
+moves or goes offline. Publication is replayed by Entry ID so a restart cannot
+append the same entry twice. Up to 256 closed entries / 8 MiB may wait; a full or
+unavailable recovery store refuses new closed-entry admission rather than dropping
+old entries. Save errors stay visible until every pending entry is resolved.
+Consent changes, scope narrowing, opt-out and Delete all discard pending writing
+intentionally. Raw open entries and scrubber context are never journaled; a
+crash/force quit can still lose unfinished writing. Graceful Quit refuses while
+the final open entry cannot be closed into durable ownership.
+
 ## Meetings
 
 Meeting captures live under:

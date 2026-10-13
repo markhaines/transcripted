@@ -30,6 +30,12 @@ final class WritingDayFileWriter {
         FileManager.writingDirectory(in: FileManager.default.transcriptedCaptureLibraryDir)
     }
 
+    nonisolated static let defaultPendingDirectory: @Sendable () -> URL = {
+        FileManager.default.transcriptedAppSupportRootURL
+            .appendingPathComponent("writing", isDirectory: true)
+            .appendingPathComponent("Pending Entries", isDirectory: true)
+    }
+
     let recorder: WritingDayFileRecorder
     /// Where cleared entries go to Personal History.
     let personalHistory: PersonalHistoryRelay
@@ -41,6 +47,7 @@ final class WritingDayFileWriter {
     /// `WritingDayFileRecorder.lastWriteFailure`), with the error case only.
     init(
         directory: @escaping @Sendable () -> URL,
+        pendingDirectory: @escaping @Sendable () -> URL,
         preferences: @escaping @Sendable () -> WritingPreferences,
         personalHistory: any PersonalHistoryIngesting,
         problemStarted: @escaping @MainActor @Sendable (WritingDayFileStore.StoreError) -> Void = { _ in }
@@ -50,6 +57,7 @@ final class WritingDayFileWriter {
         self.personalHistory = relay
         recorder = WritingDayFileRecorder(
             directory: directory,
+            pendingDirectory: pendingDirectory,
             gate: { WritingDayFileRecorder.Gate(preferences: preferences()) },
             appName: { names.name(for: $0) },
             didWrite: { url in
@@ -81,6 +89,8 @@ final class WritingDayFileWriter {
         // deadline is the recorder's; this only moves when it's checked.
         timer.tolerance = Self.idleSweepTolerance
         idleTimer = timer
+        // Replay durable entries on start, not only after new typing arrives.
+        DispatchQueue.global(qos: .utility).async { recorder.closeIdleEntries() }
         rescrubOlderDayFilesIfNeeded()
     }
 
@@ -114,11 +124,13 @@ final class WritingDayFileWriter {
     /// The final flush. Synchronous on purpose: it runs from the app's quit.
     /// The open entry's day-file write finishes here; its Personal History
     /// batch is handed off and lands only if the app lives long enough.
-    func stop() {
+    @discardableResult
+    func stop() -> Bool {
+        guard recorder.flush() else { return false }
         rescrubAllowed.set(false)
         idleTimer?.invalidate()
         idleTimer = nil
-        recorder.flush()
+        return true
     }
 }
 

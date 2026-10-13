@@ -5,6 +5,13 @@ import Foundation
 
 protocol PersonalHistoryIngesting: Sendable {
     func ingest(_ events: [PersonalHistoryEvent]) async -> Bool
+    func recordingResponse(_ events: [PersonalHistoryEvent]) async -> GhostBrainResponse
+}
+
+extension PersonalHistoryIngesting {
+    func recordingResponse(_ events: [PersonalHistoryEvent]) async -> GhostBrainResponse {
+        await ingest(events) ? .recorded : .error
+    }
 }
 
 enum PersonalNextWordShadowPhase: Equatable, Sendable {

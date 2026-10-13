@@ -228,6 +228,7 @@ final class WritingController {
     let modelRoot: URL
     /// `<capture-library>/writing`, for the day files and Delete all writing.
     let writingDirectory: @Sendable () -> URL
+    let writingPendingDirectory: @Sendable () -> URL
     let keyboardInstaller = GhostKeyboardInstallerHost()
     var inputSources: SystemWritingInputSources {
         SystemWritingInputSources(installer: keyboardInstaller)
@@ -257,11 +258,13 @@ final class WritingController {
     init(
         physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory,
         modelRoot: URL = WritingController.defaultModelRoot,
-        writingDirectory: @escaping @Sendable () -> URL = WritingDayFileWriter.defaultDirectory
+        writingDirectory: @escaping @Sendable () -> URL = WritingDayFileWriter.defaultDirectory,
+        writingPendingDirectory: @escaping @Sendable () -> URL = WritingDayFileWriter.defaultPendingDirectory
     ) {
         self.physicalMemoryBytes = physicalMemoryBytes
         self.modelRoot = modelRoot
         self.writingDirectory = writingDirectory
+        self.writingPendingDirectory = writingPendingDirectory
         // Transcripted's bundles always resolve to the production profile,
         // so the saved choice is never nil here; Gemma is Tilde's default.
         self.selectedModel = WritingModelEligibility.resolvedChoice(
@@ -365,6 +368,7 @@ final class WritingController {
             // secrets, so it's reached through the day files, not the socket.
             dayFiles: WritingDayFileWriter(
                 directory: writingDirectory,
+                pendingDirectory: writingPendingDirectory,
                 preferences: { Self.preferences() },
                 personalHistory: personalHistoryController,
                 problemStarted: { [weak self] error in
@@ -423,9 +427,20 @@ final class WritingController {
         tearDown()
     }
 
+    /// Refuse graceful Quit while the last open entry has no durable owner.
+    /// Seal admissions on the recorder queue before app teardown can race a batch.
+    func finishWritingForTermination() async -> Bool {
+        guard let recorder = runtime?.dayFiles.recorder else { return true }
+        return await Task.detached(priority: .userInitiated) {
+            recorder.flush(sealForTermination: true)
+        }.value
+    }
+
     /// The stop itself, shared by the quit and by turning both features off.
     /// A later `start` builds a fresh runtime.
     private func tearDown() {
+        // A model/runtime restart also must not drop an unresolved open entry.
+        guard runtime?.dayFiles.stop() != false else { return }
         hasStarted = false
         autocompleteRuntimeActive = false
         let wasRunning = isRunning
@@ -444,7 +459,6 @@ final class WritingController {
         ghostBrainServerHost?.stop()
         ghostBrainServerHost = nil
         // The last open entry goes to its day file before the app quits.
-        runtime?.dayFiles.stop()
         // A download in flight stops too; its resumable partial stays.
         runtime?.models.manager.cancel()
         if let host = runtime?.llamaServerHost {
