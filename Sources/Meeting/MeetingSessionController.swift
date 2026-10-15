@@ -273,8 +273,14 @@ extension MeetingSessionController {
             )
         }
         transition(to: .recording, reason: "capture_start_confirmed")
-        if AutoCallDetectionPreferences.isEnabled(), let callFamilies, let identity = activeRecordingIdentity {
-            callEndTracking = MeetingCallEndTracking(recordingIdentity: identity, families: callFamilies)
+        if AutoCallDetectionPreferences.isEnabled(), let identity = activeRecordingIdentity {
+            if let callFamilies {
+                armCallEndTracking(identity: identity, families: callFamilies, late: false)
+            } else if trigger == .detectedPrompt, let detectedCallCandidate {
+                // The call app may not be using audio yet (prompt accepted before
+                // joining); observeCallActivity binds it once it is.
+                pendingCallEndCandidate = (identity, detectedCallCandidate)
+            }
         }
         refreshSystemAudioSignalVerification(shouldWarn: startDecision.systemAudioPermissionCheckWasInconclusive)
         if startDecision.mayRaiseSystemAudioPermissionPrompt {

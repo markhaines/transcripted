@@ -16,6 +16,11 @@ extension MeetingSessionController {
         let now = ProcessInfo.processInfo.systemUptime
         latestCallActivity = snapshot
         latestCallActivityAt = snapshot.sampledAt
+        if isRecording, callEndTracking == nil, let pending = pendingCallEndCandidate,
+           pending.identity == activeRecordingIdentity,
+           let families = callEndFamilies(for: pending.candidate) {
+            armCallEndTracking(identity: pending.identity, families: families, late: true)
+        }
         guard isRecording, var tracking = callEndTracking,
               tracking.recordingIdentity == activeRecordingIdentity else { return }
         // The snapshot carries when the audio system was actually read, which can
@@ -66,7 +71,22 @@ extension MeetingSessionController {
         }
     }
 
+    func armCallEndTracking(identity: UUID, families: Set<String>, late: Bool) {
+        pendingCallEndCandidate = nil
+        callEndTracking = MeetingCallEndTracking(recordingIdentity: identity, families: families)
+        DiagnosticsTrail.record(
+            engine: "meeting",
+            event: "meeting_call_end_detection_armed",
+            message: "Call-end detection armed",
+            context: baseDiagnosticsContext(extra: [
+                "late": "\(late)",
+                "families": families.sorted().joined(separator: ",")
+            ])
+        )
+    }
+
     func disableCallEndDetection() {
+        pendingCallEndCandidate = nil
         callEndTracking = nil
         latestCallActivity = .unknown
         latestCallActivityAt = nil

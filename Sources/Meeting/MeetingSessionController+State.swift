@@ -242,6 +242,7 @@ final class MeetingSessionController: ObservableObject {
     var shouldSurfaceMeetingWarmupFailure = false
     var audioInactivityDetector = MeetingAudioInactivityDetector()
     var callEndTracking: MeetingCallEndTracking?
+    var pendingCallEndCandidate: (identity: UUID, candidate: MeetingPromptDetector.Candidate)?
     var latestCallActivity = MeetingCallActivitySnapshot.unknown
     var latestCallActivityAt: TimeInterval?
     var callCameraInUse: Bool?
