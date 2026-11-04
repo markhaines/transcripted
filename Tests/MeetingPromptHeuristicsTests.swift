@@ -752,5 +752,15 @@ func testMeetingPromptHeuristics() {
             weak,
             "without a write time the suppression is read as written"
         )
+        assertEqual(
+            MeetingPromptHeuristics.adHocLearnedQuietDeadline(weak, reason: .micInput, dismissedAt: now),
+            now.addingTimeInterval(MeetingPromptHeuristics.adHocCallDismissCap),
+            "an escalated learned quiet is capped for live calls"
+        )
+        assertEqual(
+            MeetingPromptHeuristics.adHocLearnedQuietDeadline(weak, reason: .calendarNearby, dismissedAt: now),
+            weak,
+            "calendar prompts keep the learned quiet"
+        )
     }
 }

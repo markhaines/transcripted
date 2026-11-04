@@ -42,7 +42,9 @@ extension MeetingPromptDetector {
                 browserTitles?.declinedKinds[declinedKind] = now
             }
         }
-        let learnedUntil = learnedBackoff.recordDismissal(kind: kind, now: now)
+        let learnedUntil = MeetingPromptHeuristics.adHocDismissalDeadline(
+            learnedBackoff.recordDismissal(kind: kind, now: now), reason: candidate.reason, now: now
+        )
         // A first Not now learns the same 30 minutes the normal backoff
         // already gives; only a longer learned window replaces the decision
         // (the slack absorbs the two clock reads being a moment apart).
@@ -402,7 +404,12 @@ extension MeetingPromptDetector {
         if browserTitles?.titlesReadable == true, learnedBackoff.isLearnedOff(kind: kind, now: now) {
             return (.learnedQuiet, "learned_off")
         }
-        if learnedBackoff.quietUntil(for: kind, now: now) != nil {
+        if let quietUntil = learnedBackoff.quietUntil(for: kind, now: now),
+           MeetingPromptHeuristics.adHocLearnedQuietDeadline(
+               quietUntil,
+               reason: candidate.reason,
+               dismissedAt: learnedBackoff.entry(for: kind, now: now).lastDismissedAt
+           ) > now {
             return (.learnedQuiet, MeetingPromptBackoffKind.learnedQuiet.rawValue)
         }
         return nil
