@@ -145,7 +145,8 @@ resolve_sign_identity() {
     local found_line
 
     if [ -n "$requested_identity" ]; then
-        found_line="$(security find-identity -v -p codesigning 2>/dev/null | grep -F "$requested_identity" | head -1 || true)"
+        # No -v: a self-signed local identity is "not trusted" and -v hides it.
+        found_line="$(security find-identity -p codesigning 2>/dev/null | grep -F "$requested_identity" | head -1 || true)"
         if [ -z "$found_line" ]; then
             echo "Requested signing identity not found: $requested_identity"
             echo "Available identities:"
