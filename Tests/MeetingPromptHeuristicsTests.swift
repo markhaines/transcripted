@@ -728,4 +728,29 @@ func testMeetingPromptHeuristics() {
         assertEqual(MeetingPromptCallTelemetry.dismissStreakBucket(2), "2", "a second dismissal is its own bucket")
         assertEqual(MeetingPromptCallTelemetry.dismissStreakBucket(5), "3_plus", "streaks collapse past three")
     }
+
+    runSuite("MeetingPromptHeuristics — ad-hoc live-call dismissals are capped") {
+        let now = Date()
+        let weak = now.addingTimeInterval(2 * 60 * 60)
+        assertEqual(
+            MeetingPromptHeuristics.adHocDismissalDeadline(weak, reason: .micInput, now: now),
+            now.addingTimeInterval(MeetingPromptHeuristics.adHocCallDismissCap),
+            "a Not now on a live call must not mute the provider for hours"
+        )
+        assertEqual(
+            MeetingPromptHeuristics.adHocDismissalDeadline(weak, reason: .calendarNearby, now: now),
+            weak,
+            "calendar prompts keep the full backoff"
+        )
+        assertEqual(
+            MeetingPromptHeuristics.adHocSuppressionDeadline(suppressedUntil: weak, suppressedFrom: now),
+            now.addingTimeInterval(MeetingPromptHeuristics.adHocCallDismissCap),
+            "a provider suppression written by a calendar snooze is capped for live calls"
+        )
+        assertEqual(
+            MeetingPromptHeuristics.adHocSuppressionDeadline(suppressedUntil: weak, suppressedFrom: nil),
+            weak,
+            "without a write time the suppression is read as written"
+        )
+    }
 }
