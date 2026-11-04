@@ -172,6 +172,8 @@ final class MeetingPromptDetector {
     var pendingUntil: [String: Date] = [:]
     var recentNativeActivity: [MeetingPromptProvider: Date] = [:]
     var runtimeSuppressedUntil: [MeetingPromptProvider: Date] = [:]
+    // When each provider's runtime suppression was last extended. Ad-hoc candidates cap it from here.
+    var runtimeSuppressedFrom: [MeetingPromptProvider: Date] = [:]
     var cooldownReasons: [String: String] = [:]
     var runtimeSuppressionReasons: [MeetingPromptProvider: String] = [:]
     private var suppressionTelemetryUntil: [String: Date] = [:]
@@ -572,6 +574,7 @@ final class MeetingPromptDetector {
         snoozedUntil = snoozedUntil.filter { $0.value > now }
         pendingUntil = pendingUntil.filter { $0.value > now }
         runtimeSuppressedUntil = runtimeSuppressedUntil.filter { $0.value > now }
+        runtimeSuppressedFrom = runtimeSuppressedFrom.filter { runtimeSuppressedUntil[$0.key] != nil }
         cooldownReasons = cooldownReasons.filter { entry in
             (snoozedUntil[entry.key] ?? pendingUntil[entry.key]) != nil
         }
