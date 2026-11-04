@@ -546,6 +546,12 @@ enum MeetingPromptHeuristics {
         return min(suppressedUntil, suppressedFrom.addingTimeInterval(adHocCallDismissCap))
     }
 
+    /// The persisted learned quiet as a live call sees it: capped from the last Not now.
+    static func adHocLearnedQuietDeadline(_ until: Date, reason: MeetingPromptReason, dismissedAt: Date?) -> Date {
+        guard reason.isAdHocCallSignal else { return until }
+        return adHocSuppressionDeadline(suppressedUntil: until, suppressedFrom: dismissedAt)
+    }
+
     static func backoffKind(
         for provider: MeetingPromptProvider,
         source: MeetingPromptSource,
