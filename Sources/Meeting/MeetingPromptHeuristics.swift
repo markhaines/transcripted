@@ -527,6 +527,25 @@ enum MeetingPromptHeuristics {
         provider == .teams ? max(defaultInterval, teamsDismissMinimumInterval) : defaultInterval
     }
 
+    // MARK: Ad-hoc live-call dismissal cap
+    //
+    // "Not now" on an ad-hoc call prompt means "not this call", but the provider
+    // backoff (2h for Teams) muted every later mic-confirmed call that day. Cap
+    // the ad-hoc deadline and the provider suppression it reads, both relative to
+    // when the dismissal was written. Weak calendar and runtime-app prompts keep
+    // the full backoff.
+    static let adHocCallDismissCap: TimeInterval = 10 * 60
+
+    static func adHocDismissalDeadline(_ until: Date, reason: MeetingPromptReason, now: Date) -> Date {
+        guard reason.isAdHocCallSignal else { return until }
+        return min(until, now.addingTimeInterval(adHocCallDismissCap))
+    }
+
+    static func adHocSuppressionDeadline(suppressedUntil: Date, suppressedFrom: Date?) -> Date {
+        guard let suppressedFrom else { return suppressedUntil }
+        return min(suppressedUntil, suppressedFrom.addingTimeInterval(adHocCallDismissCap))
+    }
+
     static func backoffKind(
         for provider: MeetingPromptProvider,
         source: MeetingPromptSource,

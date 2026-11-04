@@ -184,7 +184,7 @@ extension MeetingPromptDetector {
             suppressRuntimePrompts(for: candidate.provider, until: until, reason: decision.kind.rawValue)
         case .runtimeApp:
             if let resumeDate = nextRuntimePromptResumeDate(for: candidate.provider, now: now) {
-                until = resumeDate
+                until = MeetingPromptHeuristics.adHocDismissalDeadline(resumeDate, reason: candidate.reason, now: now)
                 decision = MeetingPromptBackoffDecision(
                     kind: MeetingPromptHeuristics.backoffKind(for: candidate.provider, source: .runtimeApp, hasResumeDate: true),
                     until: until
@@ -194,7 +194,9 @@ extension MeetingPromptDetector {
                     for: candidate.provider,
                     default: MeetingPromptHeuristics.defaultRuntimeDismissFallbackInterval
                 )
-                until = now.addingTimeInterval(fallbackInterval)
+                until = MeetingPromptHeuristics.adHocDismissalDeadline(
+                    now.addingTimeInterval(fallbackInterval), reason: candidate.reason, now: now
+                )
                 decision = MeetingPromptBackoffDecision(
                     kind: MeetingPromptHeuristics.backoffKind(for: candidate.provider, source: .runtimeApp),
                     until: until
@@ -402,10 +404,23 @@ extension MeetingPromptDetector {
 
     private func suppressRuntimePrompts(for provider: MeetingPromptProvider, until: Date, reason: String?) {
         let existing = runtimeSuppressedUntil[provider] ?? .distantPast
-        runtimeSuppressedUntil[provider] = max(existing, until)
+        let extended = max(existing, until)
+        runtimeSuppressedUntil[provider] = extended
+        if extended > existing {
+            runtimeSuppressedFrom[provider] = Date()
+        }
         if let reason {
             runtimeSuppressionReasons[provider] = reason
         }
+    }
+
+    /// Provider suppression as ad-hoc live-call candidates see it (capped from when it was written).
+    func adHocSuppressionDeadline(for provider: MeetingPromptProvider) -> Date? {
+        guard let until = runtimeSuppressedUntil[provider] else { return nil }
+        return MeetingPromptHeuristics.adHocSuppressionDeadline(
+            suppressedUntil: until,
+            suppressedFrom: runtimeSuppressedFrom[provider]
+        )
     }
 
     private func nextRuntimePromptResumeDate(for provider: MeetingPromptProvider, now: Date) -> Date? {

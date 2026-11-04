@@ -302,7 +302,7 @@ extension MeetingPromptDetector {
                 cancelBrowserEvidenceRecheck()
             }
 
-            if let suppressedUntil = runtimeSuppressedUntil[candidate.provider], suppressedUntil > now {
+            if let suppressedUntil = adHocSuppressionDeadline(for: candidate.provider), suppressedUntil > now {
                 let cooldown = runtimeSuppressionReasons[candidate.provider]
                 recordSuppression(
                     candidate: candidate,
