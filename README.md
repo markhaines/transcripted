@@ -1,4 +1,4 @@
-Dev tier: 3 (public)
+Dev tier: 0 (stale upstream mirror: fork main is not maintained here; superseded by the VoiceInk fork, ~/code/voiceink-meetings. Re-tiered 2026-11-16, HOMELAB-79)
 
 ![Transcripted — meeting and dictation capture on macOS](docs/assets/transcripted-github-banner.png)
 
